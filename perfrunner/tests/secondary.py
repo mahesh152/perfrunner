@@ -298,6 +298,66 @@ class InitialandIncrementalSecondaryIndexRebalanceTest(InitialandIncrementalSeco
                                                   index_type='Incremental')
         )
 
+class InitialandIncrementalSecondaryIndexRebalanceMaheshTest(InitialandIncrementalSecondaryIndexTest):
+
+    def rebalance(self, initial_nodes, nodes_after):
+        clusters = self.cluster_spec.yield_clusters()
+        for _, servers in clusters:
+            master = servers[0]
+            new_nodes = []
+            ejected_nodes = []
+            new_nodes = enumerate(
+                servers[initial_nodes:nodes_after],
+                start=initial_nodes
+            )
+            known_nodes = servers[:nodes_after]
+            for i, host_port in new_nodes:
+                self.rest.add_node(master, host_port)
+        self.rest.rebalance(master, known_nodes, ejected_nodes)
+
+    def run(self):
+        logger.info("1")
+        self.run_load_for_2i()
+        logger.info("2")
+        self.wait_for_persistence()
+        logger.info("3")
+        self.compact_bucket()
+        initial_nodes = []
+        nodes_after = [0]
+        initial_nodes = self.test_config.cluster.initial_nodes
+        nodes_after[0] = initial_nodes[0] + 1
+        logger.info("4")
+        self.rebalance(initial_nodes[0], nodes_after[0])
+        logger.info("5")
+        from_ts, to_ts = self.build_secondaryindex()
+        time_elapsed = (to_ts - from_ts) / 1000.0
+        logger.info("6")
+        time_elapsed = self.reporter.finish('Initial secondary index', time_elapsed)
+        self.reporter.post_to_sf(
+            *self.metric_helper.get_indexing_meta(value=time_elapsed,
+                                                  index_type='Initial')
+        )
+
+        master = []
+        for _, servers in self.cluster_spec.yield_clusters():
+            master = servers[0]
+        logger.info("7")
+        self.monitor.monitor_rebalance(master)
+        initial_nodes[0] += 1
+        nodes_after[0] += 1
+        logger.info("8")
+        self.rebalance(initial_nodes[0], nodes_after[0])
+        logger.info("9")
+        from_ts, to_ts = self.build_incrindex()
+        time_elapsed = (to_ts - from_ts) / 1000.0
+        logger.info("10")
+        time_elapsed = self.reporter.finish('Incremental secondary index', time_elapsed)
+        logger.info("11")
+        self.reporter.post_to_sf(
+            *self.metric_helper.get_indexing_meta(value=time_elapsed,
+                                                  index_type='Incremental')
+        )
+        logger.info("12")
 
 class SecondaryIndexingThroughputTest(SecondaryIndexTest):
 
