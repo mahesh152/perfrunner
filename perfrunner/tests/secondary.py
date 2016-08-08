@@ -43,8 +43,8 @@ class SecondaryIndexTest(PerfTest):
         self.configfile = ''
 
         self.secondaryDB = None
-        if self.test_config.secondaryindex_settings.db == 'memdb':
-            self.secondaryDB = 'memdb'
+        if self.test_config.secondaryindex_settings.db == 'moi':
+            self.secondaryDB = 'moi'
         logger.info('secondary storage DB..{}'.format(self.secondaryDB))
 
         self.indexes = self.test_config.secondaryindex_settings.name.split(',')
@@ -158,14 +158,14 @@ class SecondaryIndexTest(PerfTest):
         return time_elapsed
 
     def run_load_for_2i(self):
-        if self.secondaryDB == 'memdb':
+        if self.secondaryDB == 'moi':
             load_settings = self.test_config.load_settings
             self.remote.run_spring_on_kv(load_settings=load_settings)
         else:
             self.load()
 
     def run_access_for_2i(self, run_in_background=False):
-        if self.secondaryDB == 'memdb':
+        if self.secondaryDB == 'moi':
             access_settings = self.test_config.access_settings
             self.remote.run_spring_on_kv(load_settings=access_settings, silent=run_in_background)
         else:
@@ -217,7 +217,7 @@ class InitialandIncrementalSecondaryIndexTest(SecondaryIndexTest):
     def build_incrindex(self):
         access_settings = self.test_config.access_settings
         load_settings = self.test_config.load_settings
-        if self.secondaryDB == 'memdb':
+        if self.secondaryDB == 'moi':
             self.remote.run_spring_on_kv(load_settings=access_settings)
         else:
             self.worker_manager.run_workload(access_settings, self.target_iterator)
@@ -237,7 +237,7 @@ class InitialandIncrementalSecondaryIndexTest(SecondaryIndexTest):
             *self.metric_helper.get_indexing_meta(value=time_elapsed,
                                                   index_type='Initial')
         )
-        if self.secondaryDB != 'memdb':
+        if self.secondaryDB != 'moi':
             time.sleep(300)
         from_ts, to_ts = self.build_incrindex()
         time_elapsed = (to_ts - from_ts) / 1000.0
@@ -281,7 +281,7 @@ class InitialandIncrementalSecondaryIndexRebalanceTest(InitialandIncrementalSeco
             *self.metric_helper.get_indexing_meta(value=time_elapsed,
                                                   index_type='Initial')
         )
-        if self.secondaryDB != 'memdb':
+        if self.secondaryDB != 'moi':
             time.sleep(300)
         master = []
         for _, servers in self.cluster_spec.yield_clusters():
@@ -315,30 +315,30 @@ class SecondaryIndexingThroughputTest(SecondaryIndexTest):
 
         if self.test_config.secondaryindex_settings.stale == 'false':
             if numindexes == 1:
-                if self.secondaryDB == 'memdb':
-                    self.configfile = 'scripts/config_scanthr_sessionconsistent_memdb.json'
+                if self.secondaryDB == 'moi':
+                    self.configfile = 'scripts/config_scanthr_sessionconsistent_moi.json'
                 else:
-                    self.configfile = 'scripts/config_scanthr_sessionconsistent.json'
+                    self.configfile = 'scripts/config_scanthr_sessionconsistent_fdb.json'
             elif numindexes == 5:
-                if self.secondaryDB == 'memdb':
-                    self.configfile = 'scripts/config_scanthr_sessionconsistent_multiple_memdb.json'
+                if self.secondaryDB == 'moi':
+                    self.configfile = 'scripts/config_scanthr_sessionconsistent_multiple_moi.json'
                 else:
-                    self.configfile = 'scripts/config_scanthr_sessionconsistent_multiple.json'
+                    self.configfile = 'scripts/config_scanthr_sessionconsistent_multiple_fdb.json'
         else:
 
             if numindexes == 1:
-                if self.secondaryDB == 'memdb':
-                    self.configfile = 'scripts/config_scanthr_memdb.json'
+                if self.secondaryDB == 'moi':
+                    self.configfile = 'scripts/config_scanthr_moi.json'
                 else:
-                    self.configfile = 'scripts/config_scanthr.json'
+                    self.configfile = 'scripts/config_scanthr_fdb.json'
             elif numindexes == 5:
-                if self.secondaryDB == 'memdb':
-                    self.configfile = 'scripts/config_scanthr_multiple_memdb.json'
+                if self.secondaryDB == 'moi':
+                    self.configfile = 'scripts/config_scanthr_multiple_moi.json'
                 else:
-                    self.configfile = 'scripts/config_scanthr_multiple.json'
+                    self.configfile = 'scripts/config_scanthr_multiple_fdb.json'
         cmdstr = "/opt/couchbase/bin/cbindexperf -cluster {} -auth=\"{}:{}\" -configfile {} -resultfile result.json".format(
             self.index_nodes[0], rest_username, rest_password, self.configfile)
-        logger.info('To be applied:'.format(cmdstr))
+        logger.info('To be applied: {}'.format(cmdstr))
         status = subprocess.call(cmdstr, shell=True)
         if status != 0:
             raise Exception('Scan workload could not be applied')
@@ -364,7 +364,7 @@ class SecondaryIndexingThroughputTest(SecondaryIndexTest):
         self.wait_for_persistence()
         self.compact_bucket()
         from_ts, to_ts = self.build_secondaryindex()
-        if self.secondaryDB != 'memdb':
+        if self.secondaryDB != 'moi':
             time.sleep(300)
         self.run_access_for_2i(run_in_background=True)
         self.apply_scanworkload()
@@ -403,7 +403,7 @@ class SecondaryIndexingThroughputRebalanceTest(SecondaryIndexingThroughputTest):
         self.wait_for_persistence()
         self.compact_bucket()
         from_ts, to_ts = self.build_secondaryindex()
-        if self.secondaryDB != 'memdb':
+        if self.secondaryDB != 'moi':
             time.sleep(300)
         self.run_access_for_2i(run_in_background=True)
         initial_nodes = []
@@ -437,26 +437,26 @@ class SecondaryIndexingScanLatencyTest(SecondaryIndexTest):
 
         if self.test_config.secondaryindex_settings.stale == 'false':
             if numindexes == 1:
-                if self.secondaryDB == 'memdb':
-                    self.configfile = 'scripts/config_scanlatency_sessionconsistent_memdb.json'
+                if self.secondaryDB == 'moi':
+                    self.configfile = 'scripts/config_scanlatency_sessionconsistent_moi.json'
                 else:
-                    self.configfile = 'scripts/config_scanlatency_sessionconsistent.json'
+                    self.configfile = 'scripts/config_scanlatency_sessionconsistent_fdb.json'
             elif numindexes == 5:
-                if self.secondaryDB == 'memdb':
-                    self.configfile = 'scripts/config_scanlatency_sessionconsistent_multiple_memdb.json'
+                if self.secondaryDB == 'moi':
+                    self.configfile = 'scripts/config_scanlatency_sessionconsistent_multiple_moi.json'
                 else:
-                    self.configfile = 'scripts/config_scanlatency_sessionconsistent_multiple.json'
+                    self.configfile = 'scripts/config_scanlatency_sessionconsistent_multiple_fdb.json'
         else:
             if numindexes == 1:
-                if self.secondaryDB == 'memdb':
-                    self.configfile = 'scripts/config_scanlatency_memdb.json'
+                if self.secondaryDB == 'moi':
+                    self.configfile = 'scripts/config_scanlatency_moi.json'
                 else:
-                    self.configfile = 'scripts/config_scanlatency.json'
+                    self.configfile = 'scripts/config_scanlatency_fdb.json'
             elif numindexes == 5:
-                if self.secondaryDB == 'memdb':
-                    self.configfile = 'scripts/config_scanlatency_multiple_memdb.json'
+                if self.secondaryDB == 'moi':
+                    self.configfile = 'scripts/config_scanlatency_multiple_moi.json'
                 else:
-                    self.configfile = 'scripts/config_scanlatency_multiple.json'
+                    self.configfile = 'scripts/config_scanlatency_multiple_fdb.json'
 
         cmdstr = "/opt/couchbase/bin/cbindexperf -cluster {} -auth=\"{}:{}\" -configfile {} -resultfile result.json -statsfile /root/statsfile".format(
             self.index_nodes[0], rest_username, rest_password, self.configfile)
@@ -479,7 +479,7 @@ class SecondaryIndexingScanLatencyTest(SecondaryIndexTest):
         self.wait_for_persistence()
         self.compact_bucket()
         from_ts, to_ts = self.build_secondaryindex()
-        if self.secondaryDB != 'memdb':
+        if self.secondaryDB != 'moi':
             time.sleep(300)
         self.run_access_for_2i(run_in_background=True)
         self.apply_scanworkload()
@@ -527,7 +527,7 @@ class SecondaryIndexingScanLatencyRebalanceTest(SecondaryIndexingScanLatencyTest
         initial_nodes = self.test_config.cluster.initial_nodes
         nodes_after[0] = initial_nodes[0] + 1
         from_ts, to_ts = self.build_secondaryindex()
-        if self.secondaryDB != 'memdb':
+        if self.secondaryDB != 'moi':
             time.sleep(300)
         self.run_access_for_2i(run_in_background=True)
         self.rebalance(initial_nodes[0], nodes_after[0])
