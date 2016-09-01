@@ -26,38 +26,29 @@ class INDEXDEF:
             "planFrozen": False
         },
         "params": {
+            "doc_config": {
+                "mode": "type_field",
+                "type_field": "type"
+            },
             "mapping": {
-                "analysis": {
-                    "analyzers": {},
-                    "char_filters": {},
-                    "token_filters": {},
-                    "token_maps": {},
-                    "tokenizers": {}
-                },
-                "byte_array_converter": "json",
                 "default_analyzer": "simple",
                 "default_datetime_parser": "dateTimeOptional",
                 "default_field": "_all",
                 "default_mapping": {
                     "display_order": "0",
                     "dynamic": True,
-                    "enabled": True,
-                    "fields": [],
-                    "properties": {}
+                    "enabled": True
                 },
                 "default_type": "_default",
-                "type_field": "type",
-                "types": {}
+                "index_dynamic": True,
+                "store_dynamic": False,
+                "type_field": "type"
             },
             "store": {
-                "kvStoreName": "forestdb"
+                "kvStoreName": "mossStore"
             }
         },
         "sourceParams": {
-            "authPassword": "",
-            "authSaslPassword": "",
-            "authSaslUser": "",
-            "authUser": "default",
             "clusterManagerBackoffFactor": 0,
             "clusterManagerSleepInitMS": 0,
             "clusterManagerSleepMaxMS": 2000,
@@ -103,15 +94,15 @@ class FTStest(PerfTest):
     def access(self):
         super(FTStest, self).timer()
 
-    @with_stats
     def access_bg_test(self):
         access_settings = self.test_config.access_settings
         access_settings.fts_config = self.test_config.fts_settings
         self.access_bg(access_settings)
+        self.access()
 
     def load(self):
         logger.info('load/restore data to bucket')
-        self.remote.cbrestorefts(self.test_config.fts_settings.storage)
+        self.remote.cbrestorefts(self.test_config.fts_settings.storage, self.test_config.fts_settings.repo)
 
     def run(self):
         self.delete_index()

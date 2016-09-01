@@ -380,28 +380,6 @@ class RemoteLinuxHelper(object):
         self.env['COUCHBASE_NUM_VBUCKETS'] = num_vbuckets
         self.restart()
 
-    def restart_with_alternative_num_cpus(self, num_cpus):
-        logger.info('Changing number of front-end memcached threads to {}'
-                    .format(num_cpus))
-        self.env['MEMCACHED_NUM_CPUS'] = num_cpus
-        self.restart()
-
-    def restart_with_sfwi(self):
-        logger.info('Enabling +sfwi')
-        self.env['COUCHBASE_NS_SERVER_VM_EXTRA_ARGS'] = '["+sfwi", "100", "+sbwt", "long"]'
-        self.restart()
-
-    def restart_with_tcmalloc_aggressive_decommit(self):
-        logger.info('Enabling TCMalloc aggressive decommit')
-        self.env['TCMALLOC_AGGRESSIVE_DECOMMIT'] = 't'
-        self.restart()
-
-    @all_hosts
-    def disable_moxi(self):
-        logger.info('Disabling moxi')
-        run('rm /opt/couchbase/bin/moxi')
-        run('killall -9 moxi')
-
     @all_hosts
     def stop_server(self):
         logger.info('Stopping Couchbase Server')
@@ -482,13 +460,6 @@ class RemoteLinuxHelper(object):
             '/opt/couchbase/etc/couchbase/static_config')
 
     @all_hosts
-    def start_cbq(self):
-        logger.info('Starting cbq-engine')
-        return run('nohup cbq-engine '
-                   '-couchbase=http://127.0.0.1:8091 -dev=true -log=HTTP '
-                   '&> /tmp/cbq.log &', pty=False)
-
-    @all_hosts
     def collect_cbq_logs(self):
         logger.info('Getting cbq-engine logs')
         get('/tmp/cbq.log')
@@ -511,10 +482,15 @@ class RemoteLinuxHelper(object):
         run('/opt/couchbase/bin/couchbase-cli ssl-manage --cluster=localhost -u Administrator -p password --set-node-certificate')
 
     @single_host
-    def cbrestorefts(self, restore_path):
-        logger.info('restore from %s' % restore_path)
-        cmd = "cd /opt/couchbase/bin && ./cbrestorewrapper {}  http://127.0.0.1:8091 " \
-              "-b {} -u Administrator -p password".format(restore_path, self.test_config.buckets[0])
+    def cbrestorefts(self, archive_path, repo_path):
+        '''
+        This is updated cbrestore for spock support. As we move to spock, old version is not needed
+        ft-indexes is disabled to not to take any backup for indices.
+        '''
+        cmd = "cd /opt/couchbase/bin && ./cbbackupmgr restore --include-buckets={}  --archive {} --repo {} " \
+              " --host http://localhost:8091 --username Administrator " \
+              "--password password --threads 30 --disable-ft-indexes --disable-gsi-indexes".\
+            format(self.test_config.buckets[0], archive_path, repo_path)
         run(cmd)
 
     @single_host
@@ -809,9 +785,9 @@ class RemoteWindowsHelper(RemoteLinuxHelper):
     @staticmethod
     def put_iss_files(version):
         logger.info('Copying {} ISS files'.format(version))
-        put('scripts/install_{}.iss'.format(version),
+        put('iss/install_{}.iss'.format(version),
             '/cygdrive/c/install.iss')
-        put('scripts/uninstall_{}.iss'.format(version),
+        put('iss/uninstall_{}.iss'.format(version),
             '/cygdrive/c/uninstall.iss')
 
     @all_hosts

@@ -155,6 +155,54 @@ class Numeric(Docgen):
         c = Bucket("couchbase://{}/{}?operation_timeout=30".format(self.cb_url, self.database))
         self.insert_cb(c)
 
+
+class Datefacet:
+
+    def __init__(self):
+        from couchbase.n1ql import N1QLQuery
+        from multiprocessing import Manager, Lock
+        self.cb = Bucket('couchbase://172.23.123.38/bucket-1')
+        self.row_iter = self.cb.n1ql_query(N1QLQuery('select meta().id from `bucket-1`'))
+        self.lock = Lock()
+        self.dsize = 1000000
+        self.dateiter = Manager().dict({key: None for key in ['2013-10-17', '2013-11-17', '2014-02-09', '2015-11-26']})
+        self.dateiter['2013-10-17'] = .65 * self.dsize
+        self.dateiter['2013-11-17'] = .2 * self.dsize
+        self.dateiter['2014-02-09'] = .1 * self.dsize
+        self.dateiter['2015-11-26'] = .05 * self.dsize
+        self.cycledates = itertools.cycle(self.dateiter.keys())
+
+    def createdateset(self):
+        for resultid in self.row_iter:
+            '''
+            Day 1 should have approximately 65% of the documents
+            Day 2 should have approximately 20% of the documents
+            Day 3 should have approximately 10% of the documents
+            Day 4 should have approximately 5% of the documents
+            format like this 2010-07-27
+            '''
+            val = self.cb.get(resultid["id"]).value
+            self.lock.acquire()
+            tmpdate = self.cycledates.next()
+            val["date"] = tmpdate
+            self.cb.set(resultid["id"], val)
+            '''
+             Critical section
+            '''
+            self.dateiter[tmpdate] -= 1
+            if self.dateiter[tmpdate] == 0:
+                self.dateiter.pop(tmpdate, None)
+                self.cycledates = itertools.cycle(self.dateiter.keys())
+
+            self.lock.release()
+            print self.dateiter
+
+    def run(self):
+        import concurrent.futures
+        with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
+            executor.submit(self.createdateset())
+
+
 '''
     A = Docgen('/data/wikidata', '172.23.123.38', 'bucket-1')
     A.start_load()
@@ -162,3 +210,6 @@ class Numeric(Docgen):
     A.start_load()
     A.create_document()
 '''
+
+A = Datefacet()
+A.run()

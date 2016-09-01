@@ -99,7 +99,8 @@ class RestHelper(object):
         self.post(url=api, data=data)
 
     def set_index_mem_quota(self, host_port, mem_quota):
-        logger.info('Configuring indexer memory quota: {} to {} MB'.format(host_port, mem_quota))
+        logger.info('Configuring indexer memory quota: {} to {} MB'
+                    .format(host_port, mem_quota))
 
         api = 'http://{}/pools/default'.format(host_port)
         data = {'indexMemoryQuota': mem_quota}
@@ -108,6 +109,7 @@ class RestHelper(object):
     def set_fts_index_mem_quota(self, host_port, mem_quota):
         logger.info('Configuring  FTS indexer memory quota: {} to {} MB'.
                     format(host_port, mem_quota))
+
         api = 'http://{}/pools/default'.format(host_port)
         data = {'ftsMemoryQuota': mem_quota}
         self.post(url=api, data=data)
@@ -127,25 +129,25 @@ class RestHelper(object):
             logger.info('Changing query setting {} to {}'.format(override, value))
         self.post(url=api, data=json.dumps(settings), headers=headers)
 
-    def set_index_settings(self, host_port, override_settings):
+    def set_index_settings(self, host_port, settings):
+        logger.info('Changing indexer settings for {}'.format(host_port))
+
         host = host_port.replace('8091', '9102')
         api = 'http://{}/settings'.format(host)
-        headers = {'Content-type': 'application/json', 'Accept': 'text/plain'}
 
-        settings = self.get(url=api).json()
-        for override, value in override_settings.items():
-            if override not in settings:
-                logger.error('Cannot change 2i setting {} to {}, setting invalid'
-                             .format(override, value))
-                continue
-            settings[override] = value
-            logger.info('Changing 2i setting {} to {}'.format(override, value))
+        curr_settings = self.get(url=api).json()
+        for option, value in settings.items():
+            if option in curr_settings:
+                logger.info('Changing {} to {}'.format(option, value))
+                self.post(url=api, data=json.dumps({option: value}))
+            else:
+                logger.warn('Skipping unknown option: {}'.format(option))
 
-        self.post(url=api, data=json.dumps(settings), headers=headers)
-        time.sleep(10)
-        new_settings = self.get(url="{}?internal=ok".format(api)).json()
-        logger.info("New internal settings: {}"
-                    .format(misc.pretty_dict(new_settings)))
+    def get_index_settings(self, host_port):
+        host = host_port.replace('8091', '9102')
+        api = 'http://{}/settings?internal=ok'.format(host)
+
+        return self.get(url=api).json()
 
     def set_services(self, host_port, services):
         logger.info('Configuring services on master node: {}'.format(host_port))
@@ -240,27 +242,22 @@ class RestHelper(object):
         }
 
         if proxy_port is None:
-            data.update(
-                {
-                    'authType': 'sasl',
-                    'saslPassword': password,
-                })
+            data.update({
+                'authType': 'sasl',
+                'saslPassword': password,
+            })
         else:
-            data.update(
-                {
-                    'authType': 'none',
-                    'proxyPort': proxy_port,
-                })
-
-        if time_synchronization:
-            data.update(
-                {
-                    'timeSynchronization': time_synchronization,
-                })
-        logger.info('bucket specification: {}'.format(data))
-
+            data.update({
+                'authType': 'none',
+                'proxyPort': proxy_port,
+            })
         if threads_number:
-            data.update({'threadsNumber': threads_number})
+            data['threadsNumber'] = threads_number
+        if time_synchronization:
+            data['timeSynchronization'] = time_synchronization
+
+        logger.info('Bucket configuration: {}'.format(misc.pretty_dict(data)))
+
         self.post(url=api, data=data)
 
     def delete_bucket(self, host_port, name):
@@ -285,6 +282,10 @@ class RestHelper(object):
             'parallelDBAndViewCompaction': str(settings.parallel).lower()
         }
         self.post(url=api, data=data)
+
+    def get_auto_compaction_settings(self, host_port):
+        api = 'http://{}/settings/autoCompaction'.format(host_port)
+        return self.get(url=api).json()
 
     def get_bucket_stats(self, host_port, bucket):
         api = 'http://{}/pools/default/buckets/{}/stats'.format(host_port,
@@ -518,51 +519,16 @@ class RestHelper(object):
         return [server.split(':')[0]
                 for server in data['vBucketServerMap']['serverList']]
 
-    def exec_n1ql_stmnt(self, host, stmnt):
-        logger.info('Executing: {}'.format(stmnt))
+    def exec_n1ql_statement(self, host, statement):
+        logger.info('Executing N1QL statement: {}'.format(statement))
+
         api = 'http://{}:8093/query/service'.format(host)
         data = {
-            'statement': '{0}'.format(stmnt)
+            'statement': statement,
         }
-        return self.post(url=api, data=data)
 
-    def n1ql_query(self, host, stmnt):
-        logger.info('Executing: {}'.format(stmnt))
-        api = 'http://{}:8093/query/service'.format(host)
-        headers = {'content-type': 'text/plain'}
-        resp = self.post(url=api, data=stmnt, headers=headers)
-        return resp.json()
-
-    def wait_for_indexes_to_become_online(self, host, index_name=None):
-        # POLL to ensure the indexes become online
-        url = 'http://{}:8093/query/service'.format(host)
-        data = {
-            'statement': 'SELECT * FROM system:indexes'
-        }
-        if index_name is not None:
-            data = {
-                'statement': 'SELECT * FROM system:indexes WHERE name = "{}"'.format(index_name)
-            }
-
-        ready = False
-        while not ready:
-            time.sleep(10)
-            resp = requests.Session().post(url=url, data=data)
-            if resp.json()['status'] == 'success':
-                results = resp.json()['results']
-                for result in results:
-                    if result['indexes']['state'] == 'online':
-                        ready = True
-                    else:
-                        ready = False
-                        break
-            else:
-                logger.error('Query:{} => Did not return a success!'.format(data['statement']))
-
-        if index_name is None:
-            logger.info('All Indexes: ONLINE')
-        else:
-            logger.info('Index:{} is ONLINE'.format(index_name))
+        response = self.post(url=api, data=data)
+        return response.json()
 
     def wait_for_secindex_init_build(self, host, indexes, rest_username, rest_password):
         # POLL until initial index build is complete

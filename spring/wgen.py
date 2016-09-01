@@ -5,21 +5,32 @@ from multiprocessing import Event, Lock, Process, Value
 
 from couchbase.exceptions import ValueFormatError
 from couchbase.n1ql import MutationState, N1QLQuery
-from dcp import DcpClient, ResponseHandler
 from decorator import decorator
 from logger import logger
-from psutil import cpu_count
 from numpy import random
+from psutil import cpu_count
 from twisted.internet import reactor
 
-from spring.cbgen import (CBAsyncGen, CBGen, ElasticGen, FtsGen, N1QLGen,
-                          SubDocGen)
-from spring.docgen import (ExistingKey, KeyForCASUpdate,
-                           KeyForRemoval, MergeDocument,
-                           NewDocument, NewKey, NewLargeDocument,
-                           NewNestedDocument, ReverseLookupDocument,
-                           ReverseLookupDocumentArrayIndexing,
-                           SequentialHotKey)
+from spring.cbgen import (
+    CBAsyncGen,
+    CBGen,
+    ElasticGen,
+    FtsGen,
+    N1QLGen,
+    SubDocGen,
+)
+from spring.docgen import (
+    ExistingKey,
+    KeyForCASUpdate,
+    KeyForRemoval,
+    NewKey,
+    NewDocument,
+    NewLargeDocument,
+    NewNestedDocument,
+    ReverseLookupDocument,
+    ReverseLookupDocumentArrayIndexing,
+    SequentialHotKey,
+)
 from spring.querygen import N1QLQueryGen, ViewQueryGen, ViewQueryGenByType
 
 
@@ -35,8 +46,6 @@ def with_sleep(method, *args):
         delta = self.target_time - actual_time
         if delta > 0:
             time.sleep(self.CORRECTION_FACTOR * delta)
-        else:
-            self.fallingBehindCount += 1
 
 
 def set_cpu_afinity(sid):
@@ -63,31 +72,15 @@ class Worker(object):
         self.keys_for_removal = KeyForRemoval(self.ts.prefix)
 
         if not hasattr(self.ws, 'doc_gen') or self.ws.doc_gen == 'old':
-            extra_fields = False
-            if (hasattr(self.ws, 'extra_doc_fields') and
-                    self.ws['extra_doc_fields'] == 'yes'):
-                extra_fields = True
-            self.docs = NewDocument(self.ws.size, extra_fields)
+            self.docs = NewDocument(self.ws.size)
         elif self.ws.doc_gen == 'new':
             self.docs = NewNestedDocument(self.ws.size)
-        elif self.ws.doc_gen == 'merge':
-            is_random = True
-            if self.ts.prefix == 'n1ql':
-                is_random = False
-            self.docs = MergeDocument(self.ws.size,
-                                      self.ws.doc_partitions,
-                                      is_random)
         elif self.ws.doc_gen == 'reverse_lookup':
-            is_random = True
-            if self.ts.prefix == 'n1ql':
-                is_random = False
+            is_random = self.ts.prefix != 'n1ql'
             self.docs = ReverseLookupDocument(self.ws.size,
                                               self.ws.doc_partitions,
                                               is_random)
         elif self.ws.doc_gen == 'reverse_lookup_array_indexing':
-            is_random = True
-            if self.ts.prefix == 'n1ql':
-                is_random = False
             if self.ws.updates:
                 # plus 10 to all values in array when updating doc
                 self.docs = ReverseLookupDocumentArrayIndexing(
@@ -101,7 +94,6 @@ class Worker(object):
 
         self.next_report = 0.05  # report after every 5% of completion
 
-        host, port = self.ts.node.split(':')
         # Only FTS uses proxyPort and authless bucket right now.
         # Instead of jumping hoops to specify proxyPort in target
         # iterator/settings, which only passes down very specific attributes,
@@ -109,12 +101,10 @@ class Worker(object):
         # authless bucket. FTS's worker does its own Couchbase.connect
         if not (hasattr(self.ws, "fts") and hasattr(
                 self.ws.fts, "doc_database_url")):
-            # default sasl bucket
+            host, port = self.ts.node.split(':')
             self.init_db({'bucket': self.ts.bucket, 'host': host, 'port': port,
                           'username': self.ts.bucket,
                           'password': self.ts.password})
-
-        self.fallingBehindCount = 0
 
     def init_db(self, params):
         try:
@@ -135,6 +125,8 @@ class Worker(object):
 
 
 class KVWorker(Worker):
+
+    NAME = 'kv-worker'
 
     def gen_cmd_sequence(self, cb=None, cases="cas"):
         ops = \
@@ -220,7 +212,7 @@ class KVWorker(Worker):
         self.curr_items = curr_items
         self.deleted_items = deleted_items
 
-        logger.info('Started: worker-{}'.format(self.sid))
+        logger.info('Started: {}-{}'.format(self.NAME, self.sid))
         try:
             while self.run_condition(curr_ops):
                 with lock:
@@ -228,9 +220,9 @@ class KVWorker(Worker):
                 self.do_batch()
                 self.report_progress(curr_ops.value)
         except (KeyboardInterrupt, ValueFormatError):
-            logger.info('Interrupted: worker-{}'.format(self.sid))
+            logger.info('Interrupted: {}-{}'.format(self.NAME, self.sid))
         else:
-            logger.info('Finished: worker-{}'.format(self.sid))
+            logger.info('Finished: {}-{}'.format(self.NAME, self.sid))
 
 
 class SubDocWorker(KVWorker):
@@ -248,6 +240,8 @@ class SubDocWorker(KVWorker):
 
 
 class AsyncKVWorker(KVWorker):
+
+    NAME = 'async-kv-worker'
 
     NUM_CONNECTIONS = 8
 
@@ -269,7 +263,7 @@ class AsyncKVWorker(KVWorker):
                     self.curr_ops.value >= self.ws.ops or self.time_to_stop()):
                 with self.lock:
                     self.done = True
-                logger.info('Finished: worker-{}'.format(self.sid))
+                logger.info('Finished: {}-{}'.format(self.NAME, self.sid))
                 reactor.stop()
             else:
                 self.do_batch(_, cb, i)
@@ -322,7 +316,7 @@ class AsyncKVWorker(KVWorker):
             d = cb.client.connect()
             d.addCallback(self.do_batch, cb, i)
             d.addErrback(self.error, cb, i)
-        logger.info('Started: worker-{}'.format(self.sid))
+        logger.info('Started: {}-{}'.format(self.NAME, self.sid))
         reactor.run()
 
 
@@ -372,6 +366,8 @@ class ViewWorkerFactory(object):
 
 class QueryWorker(Worker):
 
+    NAME = 'query-worker'
+
     def __init__(self, workload_settings, target_settings, shutdown_event):
         super(QueryWorker, self).__init__(workload_settings, target_settings,
                                           shutdown_event)
@@ -383,7 +379,7 @@ class QueryWorker(Worker):
         deleted_spot = \
             self.deleted_items.value + self.ws.deletes * self.ws.workers
 
-        for _ in xrange(self.BATCH_SIZE):
+        for _ in range(self.BATCH_SIZE):
             key = self.existing_keys.next(curr_items_spot, deleted_spot)
             doc = self.docs.next(key)
             doc['key'] = key
@@ -405,19 +401,16 @@ class QueryWorker(Worker):
         self.curr_queries = curr_queries
 
         try:
-            logger.info('Started: {}-{}'.format(self.name, self.sid))
+            logger.info('Started: {}-{}'.format(self.NAME, self.sid))
             while curr_queries.value < self.ws.ops and not self.time_to_stop():
                 with lock:
                     curr_queries.value += self.BATCH_SIZE
                 self.do_batch()
                 self.report_progress(curr_queries.value)
         except (KeyboardInterrupt, ValueFormatError, AttributeError) as e:
-            logger.info('Interrupted: {}-{}-{}'.format(self.name, self.sid, e))
+            logger.info('Interrupted: {}-{}, {}'.format(self.NAME, self.sid, e))
         else:
-            if self.fallingBehindCount > 0:
-                logger.info('Worker {0} fell behind {1} times.'
-                            .format(self.name, self.fallingBehindCount))
-            logger.info('Finished: {}-{}'.format(self.name, self.sid))
+            logger.info('Finished: {}-{}'.format(self.NAME, self.sid))
 
 
 class ViewWorker(QueryWorker):
@@ -427,7 +420,6 @@ class ViewWorker(QueryWorker):
                                          shutdown_event)
         self.total_workers = self.ws.query_workers
         self.throughput = self.ws.query_throughput
-        self.name = 'query-worker'
 
         if workload_settings.index_type is None:
             self.new_queries = ViewQueryGen(workload_settings.ddocs,
@@ -445,39 +437,34 @@ class N1QLWorkerFactory(object):
 
 class N1QLWorker(Worker):
 
+    NAME = 'n1ql-worker'
+
     def __init__(self, workload_settings, target_settings, shutdown_event):
         super(N1QLWorker, self).__init__(workload_settings, target_settings,
                                          shutdown_event)
         self.new_queries = N1QLQueryGen(workload_settings.n1ql_queries)
         self.total_workers = self.ws.n1ql_workers
         self.throughput = self.ws.n1ql_throughput
-        self.name = 'n1ql-worker'
 
         host, port = self.ts.node.split(':')
         bucket = self.ts.bucket
         if workload_settings.n1ql_op == 'ryow':
             bucket += '?fetch_mutation_tokens=true'
 
-        params = {'bucket': bucket, 'host': host, 'port': port,
-                  'username': self.ts.bucket, 'password': self.ts.password}
-
         self.existing_keys = ExistingKey(self.ws.working_set,
                                          self.ws.working_set_access,
                                          'n1ql')
         self.new_keys = NewKey('n1ql', self.ws.expiration)
         self.keys_for_removal = KeyForRemoval('n1ql')
-        self.keys_for_casupdate = KeyForCASUpdate(self.total_workers, self.ws.working_set,
+        self.keys_for_casupdate = KeyForCASUpdate(self.total_workers,
+                                                  self.ws.working_set,
                                                   self.ws.working_set_access,
                                                   'n1ql')
 
-        if self.ws.doc_gen == 'merge':
-            self.docs = MergeDocument(self.ws.size,
-                                      self.ws.doc_partitions,
-                                      False)
-        elif self.ws.doc_gen == 'reverse_lookup':
+        if self.ws.doc_gen == 'reverse_lookup':
             self.docs = ReverseLookupDocument(self.ws.size,
                                               self.ws.doc_partitions,
-                                              False)
+                                              is_random=False)
         elif self.ws.doc_gen == 'reverse_lookup_array_indexing':
             if self.ws.updates:
                 self.docs = ReverseLookupDocumentArrayIndexing(
@@ -486,6 +473,9 @@ class N1QLWorker(Worker):
             else:
                 self.docs = ReverseLookupDocumentArrayIndexing(
                     self.ws.size, self.ws.doc_partitions, self.ws.items)
+
+        params = {'bucket': bucket, 'host': host, 'port': port,
+                  'username': self.ts.bucket, 'password': self.ts.password}
         self.cb = N1QLGen(**params)
 
     @with_sleep
@@ -531,7 +521,7 @@ class N1QLWorker(Worker):
                 self.casupdated_items.value += self.BATCH_SIZE
 
         if self.ws.n1ql_op == 'create':
-            for _ in xrange(self.BATCH_SIZE):
+            for _ in range(self.BATCH_SIZE):
                 curr_items_tmp += 1
                 key, ttl = self.new_keys.next(curr_items_tmp)
                 doc = self.docs.next(key)
@@ -541,7 +531,7 @@ class N1QLWorker(Worker):
                 self.cb.query(ddoc_name, view_name, query=query)
 
         elif self.ws.n1ql_op == 'delete':
-            for _ in xrange(self.BATCH_SIZE):
+            for _ in range(self.BATCH_SIZE):
                 deleted_items_tmp += 1
                 key = self.keys_for_removal.next(deleted_items_tmp)
                 doc = self.docs.next(key)
@@ -551,7 +541,7 @@ class N1QLWorker(Worker):
                 self.cb.query(ddoc_name, view_name, query=query)
 
         elif self.ws.n1ql_op == 'update' or self.ws.n1ql_op == 'lookupupdate':
-            for _ in xrange(self.BATCH_SIZE):
+            for _ in range(self.BATCH_SIZE):
                 key = self.keys_for_casupdate.next(self.sid, curr_items_spot, deleted_spot)
                 doc = self.docs.next(key)
                 doc['key'] = key
@@ -560,7 +550,7 @@ class N1QLWorker(Worker):
                 self.cb.query(ddoc_name, view_name, query=query)
 
         elif self.ws.n1ql_op == 'ryow':
-            for _ in xrange(self.BATCH_SIZE):
+            for _ in range(self.BATCH_SIZE):
                 query = self.ws.n1ql_queries[0]['statement'][1:-1]
                 if self.ws.n1ql_queries[0]['prepared'] == "singleton_unique_lookup":
                     by_key = 'email'
@@ -599,18 +589,6 @@ class N1QLWorker(Worker):
                 self.cb.query(ddoc_name, view_name, query=query)
                 deleted_capped_items_tmp += 1
 
-        elif self.ws.n1ql_op == 'merge':  # run select * workload for merge
-            for _ in xrange(self.BATCH_SIZE):
-                key = self.existing_keys.next(curr_items_spot, deleted_spot)
-                doc = self.docs.next(key)
-                doc['key'] = key
-                doc['bucket'] = self.ts.bucket
-                ddoc_name, view_name, query = self.new_queries.next(doc)
-                query['statement'] = "SELECT * FROM `bucket-1` USE KEYS[$1];"
-                query['args'] = "[\"{key}\"]".format(**doc)
-                del query['prepared']
-                self.cb.query(ddoc_name, view_name, query=query)
-
     def run(self, sid, lock, curr_queries, curr_items, deleted_items,
             casupdated_items, deleted_capped_items):
         self.cb.start_updater()
@@ -629,100 +607,16 @@ class N1QLWorker(Worker):
         self.curr_queries = curr_queries
 
         try:
-            logger.info('Started: {}-{}'.format(self.name, self.sid))
+            logger.info('Started: {}-{}'.format(self.NAME, self.sid))
             while curr_queries.value < self.ws.ops and not self.time_to_stop():
                 with self.lock:
                     curr_queries.value += self.BATCH_SIZE
                 self.do_batch()
                 self.report_progress(curr_queries.value)
         except (KeyboardInterrupt, ValueFormatError, AttributeError) as e:
-            logger.info('Interrupted: {}-{}-{}'.format(self.name, self.sid, e))
+            logger.info('Interrupted: {}-{}-{}'.format(self.NAME, self.sid, e))
         else:
-            if self.fallingBehindCount > 0:
-                logger.info('Worker {0} fell behind {1} times.'.
-                            format(self.name, self.fallingBehindCount))
-            logger.info('Finished: {}-{}'.format(self.name, self.sid))
-
-
-class DcpWorkerFactory(object):
-
-    def __new__(cls, workload_settings):
-        return DcpWorker, workload_settings.dcp_workers
-
-
-class DcpHandler(ResponseHandler):
-
-    def __init__(self):
-        ResponseHandler.__init__(self)
-        self.count = 0
-
-    def mutation(self, response):
-        pass
-        self.count += 1
-
-    def deletion(self, response):
-        pass
-        self.count += 1
-
-    def marker(self, response):
-        pass
-
-    def stream_end(self, response):
-        pass
-
-    def get_num_items(self):
-        return self.count
-
-
-class DcpWorker(Worker):
-
-    def __init__(self, workload_settings, target_settings,
-                 shutdown_event=None):
-        super(DcpWorker, self).__init__(workload_settings, target_settings,
-                                        shutdown_event)
-
-    def init_db(self, params):
-        pass
-
-    def run(self, sid, lock):
-        self.sid = sid
-        host, port = self.ts.node.split(':')
-
-        try:
-            self.handler = DcpHandler()
-            self.dcp_client = DcpClient()
-            self.dcp_client.connect(host, int(port), self.ts.bucket,
-                                    'Administrator', 'password',
-                                    self.handler)
-        except:
-            logger.info('Connection Error: dcp-worker-{}'.format(self.sid))
-            return
-
-        logger.info('Started: query-worker-{}'.format(self.sid))
-        for vb in range(1024):
-            start_seqno = 0
-            end_seqno = 18446744073709551615  # 2^64 - 1
-            result = self.dcp_client.add_stream(vb, 0, start_seqno, end_seqno,
-                                                0, 0, 0)
-            if result['status'] != 0:
-                logger.warn('Stream failed for vb {} due to error {}'
-                            .format(vb, result['status']))
-
-        no_items = 0
-        last_item_count = 0
-        while no_items < 10:
-            time.sleep(1)
-            cur_items = self.handler.get_num_items()
-            if cur_items == last_item_count:
-                no_items += 1
-            else:
-                no_items = 0
-            last_item_count = cur_items
-
-        self.dcp_client.close()
-
-        logger.info('Finished: dcp-worker-{}, read {} items'
-                    .format(self.sid, last_item_count))
+            logger.info('Finished: {}-{}'.format(self.NAME, self.sid))
 
 
 class FtsWorkerFactory(object):
@@ -738,6 +632,7 @@ class FtsWorkerFactory(object):
 
 
 class FtsWorker(Worker):
+
     BATCH_SIZE = 100
 
     def __init__(self, workload_settings, target_settings, shutdown_event=None):
@@ -753,6 +648,7 @@ class FtsWorker(Worker):
 
         self.fts_es_query = instance
         self.fts_es_query.prepare_query()
+        self.count = 0
 
     def do_check_result(self, r):
         '''
@@ -779,12 +675,22 @@ class FtsWorker(Worker):
                     '''
                     try:
                         r = cmd(**args)
+                        '''
+                        increment in sinle thread, so llock needed
+                        '''
+                        self.count += 1
+                        if self.count % 10000 == 0:
+                            '''
+                             Dump a sample of queries
+                             '''
+                            logger.info(args)
+                            logger.info(r.text)
                         if not self.ws.fts_config.logfile:
                             '''
                              Error Checking if logfile is missing test file
                             '''
                             continue
-                        f = open(self.ws.fts_config.logfile, 'w')
+                        f = open(self.ws.fts_config.logfile, 'a')
                         if r.status_code not in range(200, 203) \
                                 or self.do_check_result(r):
                             f.write(str(args))
@@ -863,7 +769,6 @@ class WorkloadGen(object):
         self.start_workers(ViewWorkerFactory, 'view', curr_items, deleted_items)
         self.start_workers(N1QLWorkerFactory, 'n1ql', curr_items, deleted_items,
                            casupdated_items, deleted_capped_items)
-        self.start_workers(DcpWorkerFactory, 'dcp')
         self.start_workers(FtsWorkerFactory, 'fts')
 
         if self.timer:

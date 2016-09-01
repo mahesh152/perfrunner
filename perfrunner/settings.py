@@ -162,14 +162,6 @@ class TestConfig(Config):
         ]
 
     @property
-    def emptybuckets(self):
-        return [
-            'bucket-{}'.format(i + 1) for i in range(self.cluster.num_buckets,
-                                                     self.cluster.num_buckets +
-                                                     self.cluster.emptybuckets)
-        ]
-
-    @property
     def max_buckets(self):
         return [
             'bucket-{}'.format(i + 1) for i in range(self.cluster.max_num_buckets)
@@ -179,10 +171,6 @@ class TestConfig(Config):
     def compaction(self):
         options = self._get_options_as_dict('compaction')
         return CompactionSettings(options)
-
-    @property
-    def watermark_settings(self):
-        return self._get_options_as_dict('watermarks')
 
     @property
     def restore_settings(self):
@@ -224,6 +212,11 @@ class TestConfig(Config):
     def n1ql_settings(self):
         options = self._get_options_as_dict('n1ql')
         return N1QLSettings(options)
+
+    @property
+    def backup_settings(self):
+        options = self._get_options_as_dict('backup')
+        return BackupSettings(options)
 
     @property
     def access_settings(self):
@@ -273,6 +266,11 @@ class TestConfig(Config):
         options = self._get_options_as_dict('ycsb')
         return YcsbSettings(options)
 
+    @property
+    def dailyp_settings(self):
+        options = self._get_options_as_dict('dailyp')
+        return DailypSettings(options)
+
     def get_n1ql_query_definition(self, query_name):
         return self._get_options_as_dict('n1ql-{}'.format(query_name))
 
@@ -294,16 +292,8 @@ class TestCaseSettings(object):
 
 class ClusterSettings(object):
 
-    NUM_BUCKETS = 1
-    NUM_EMPTYBUCKETS = 0
-    MIN_NUM_BUCKETS = 1
-    MAX_NUM_BUCKETS = 10
-    INCR_NUM_BUCKETS = 1
     GROUP_NUMBER = 1
-    NUM_CPUS = 0  # Use defaults
-    RUN_CBQ = 0
-    SFWI = 0
-    TCMALLOC_AGGRESSIVE_DECOMMIT = 0
+    NUM_BUCKETS = 1
     INDEX_MEM_QUOTA = 256
     FTS_INDEX_MEM_QUOTA = 512
 
@@ -315,21 +305,8 @@ class ClusterSettings(object):
             int(nodes) for nodes in options.get('initial_nodes').split()
         ]
         self.num_buckets = int(options.get('num_buckets', self.NUM_BUCKETS))
-        self.emptybuckets = int(options.get('emptybuckets', self.NUM_EMPTYBUCKETS))
-        self.min_num_buckets = int(options.get('min_num_buckets',
-                                               self.MIN_NUM_BUCKETS))
-        self.max_num_buckets = int(options.get('max_num_buckets',
-                                               self.MAX_NUM_BUCKETS))
-        self.incr_num_buckets = int(options.get('incr_num_buckets',
-                                                self.INCR_NUM_BUCKETS))
         self.num_vbuckets = options.get('num_vbuckets')
         self.group_number = int(options.get('group_number', self.GROUP_NUMBER))
-        self.num_cpus = int(options.get('num_cpus', self.NUM_CPUS))
-        self.disable_moxi = options.get('disable_moxi')
-        self.run_cbq = options.get('run_cbq', self.RUN_CBQ)
-        self.sfwi = options.get('sfwi', self.SFWI)
-        self.tcmalloc_aggressive_decommit = options.get('tcmalloc_aggressive_decommit',
-                                                        self.TCMALLOC_AGGRESSIVE_DECOMMIT)
 
 
 class StatsSettings(object):
@@ -495,7 +472,6 @@ class PhaseSettings(object):
     QUERY_WORKERS = 0
     N1QL_WORKERS = 0
     N1QL_OP = 'read'
-    DCP_WORKERS = 0
     SPRING_WORKERS = 100
 
     SEQ_READS = False
@@ -542,7 +518,6 @@ class PhaseSettings(object):
                                             self.N1QL_WORKERS))
         self.subdoc_workers = 0
         self.n1ql_op = options.get('n1ql_op', self.N1QL_OP)
-        self.dcp_workers = int(options.get('dcp_workers', self.DCP_WORKERS))
         self.spring_workers = int(options.get('spring_workers', self.SPRING_WORKERS))
         self.n1ql_queries = []
         if 'n1ql_queries' in options:
@@ -666,15 +641,7 @@ class SecondaryIndexSettings(object):
             if val:
                 setattr(self, index_partition_name, val)
 
-        self.settings = {
-            'indexer.settings.inmemory_snapshot.interval': 200,
-            'indexer.settings.log_level': 'info',
-            'indexer.settings.max_cpu_percent': 2400,
-            'indexer.settings.persisted_snapshot.interval': 5000,
-            'indexer.settings.scan_timeout': 0,
-            'indexer.settings.storage_mode': 'forestdb',
-            'projector.settings.log_level': 'info'
-        }
+        self.settings = {}
 
         for option in options:
             if option.startswith('indexer') or \
@@ -759,6 +726,14 @@ class AccessSettings(PhaseSettings):
         return str(self.__dict__)
 
 
+class BackupSettings(object):
+
+    COMPRESSION = False
+
+    def __init__(self, options):
+        self.compression = int(options.get('compression', self.COMPRESSION))
+
+
 class WorkerSettings(object):
 
     REUSE_WORKSPACE = 'false'
@@ -787,6 +762,7 @@ class FtsSettings(object):
         self.logfile = options.get("logfile", None)
         self.orderby = options.get("orderby", None)
         self.storage = options.get("backup_path")
+        self.repo = options.get("repo_path")
         self.field = options.get("field", None)
 
     def __str__(self):
@@ -808,6 +784,16 @@ class YcsbSettings(object):
         self.log_file = options.get("export_file")
         self.log_path = options.get("export_file_path")
         self.index = options.get("index")
+
+    def __str__(self):
+        return str(self.__dict__)
+
+
+class DailypSettings(object):
+    def __init__(self, options):
+        self.category = options.get("dailyp_category")
+        self.subcategory = options.get("dailyp_subcategory")
+        self.threshold = int(options.get("threshold"))
 
     def __str__(self):
         return str(self.__dict__)

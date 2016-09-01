@@ -1,5 +1,4 @@
 import time
-from exceptions import NotImplementedError
 
 from logger import logger
 
@@ -15,53 +14,37 @@ class N1QLTest(PerfTest):
         'secondary_stats': True,
     }
 
-    def __init__(self, *args, **kwargs):
-        super(N1QLTest, self).__init__(*args, **kwargs)
-
     def build_index(self):
         for name, servers in self.cluster_spec.yield_servers_by_role('n1ql'):
-            if not servers:
-                raise Exception('No query servers specified for cluster \"{}\",'
-                                ' cannot create indexes'.format(name))
-
-            if not self.test_config.buckets:
-                raise Exception('No buckets specified for cluster \"{}\",'
-                                ' cannot create indexes'.format(name))
-
             query_node = servers[0].split(':')[0]
             for bucket in self.test_config.buckets:
                 self._build_index(query_node, bucket)
 
     def _build_index(self, query_node, bucket):
-
         names = list()
         for index in self.test_config.n1ql_settings.indexes:
-
             if '{partition_id}' in index:
                 for id in range(self.test_config.load_settings.doc_partitions):
-                    index_name = index.split('::')[0].format(partition_id=id)
-                    index_query = index.split('::')[1]
+                    index_name, index_query = index.split('::')
+                    index_name = index_name.format(partition_id=id)
                     query = index_query.format(name=index_name, bucket=bucket,
                                                partition_id=id)
-                    self.rest.n1ql_query(query_node, query)
+                    self.rest.exec_n1ql_statement(query_node, query)
                     names.append(index_name)
             else:
-                index_name = index.split('::')[0]
-                index_query = index.split('::')[1]
+                index_name, index_query = index.split('::')
                 query = index_query.format(name=index_name, bucket=bucket)
-                self.rest.n1ql_query(query_node, query)
+                self.rest.exec_n1ql_statement(query_node, query)
                 names.append(index_name)
 
-            for name in names:
-                self.rest.wait_for_indexes_to_become_online(host=query_node,
-                                                            index_name=name)
+        for name in names:
+            self.monitor.monitor_index_state(host=query_node, index_name=name)
 
     def _create_prepared_statements(self):
         self.n1ql_queries = []
         prepared_stmnts = list()
         for query in self.test_config.access_settings.n1ql_queries:
             if 'prepared' in query and query['prepared']:
-
                 if '{partition_id}' in query['prepared']:
                     for id in range(self.test_config.load_settings.doc_partitions):
                         name = query['prepared'].format(partition_id=id)
@@ -77,39 +60,36 @@ class N1QLTest(PerfTest):
             self.n1ql_queries.append(query)
 
         for name, servers in self.cluster_spec.yield_servers_by_role('n1ql'):
-            if not servers:
-                raise Exception('No query servers specified for cluster \"{}\",'
-                                ' cannot create prepared statement'.format(name))
-
-            if not self.test_config.buckets:
-                raise Exception('No buckets specified for cluster \"{}\", '
-                                'cannot create prepared statement'.format(name))
-
             for server in servers:
                 query_node = server.split(':')[0]
-                for stmt in prepared_stmnts:
-                    self.rest.n1ql_query(query_node, stmt)
+                for statement in prepared_stmnts:
+                    self.rest.exec_n1ql_statement(query_node, statement)
 
     @with_stats
     def access(self, access_settings=None):
         super(N1QLTest, self).timer()
 
     def run(self):
-        raise NotImplementedError("N1QLTest is a base test and cannot be run")
+        """Important: the test creates two data sets with different key
+        prefixes.
 
+        In order to run the N1QL tests we need to satisfy two contradicting
+        requirements:
+        * Fields should be changed so that the secondary indexes are being
+        updated.
+        * Fields remain the same (based on a deterministic random algorithm) so
+        that we can query them.
 
-class N1QLLatencyTest(N1QLTest):
-
-    def __init__(self, *args, **kwargs):
-        super(N1QLLatencyTest, self).__init__(*args, **kwargs)
-
-    def run(self):
+        The following workaround was introduced:
+        * 50% of documents are being randomly mutated. These documents are not
+        used for queries.
+        * 50% of documents remain unchanged. Only these documents are used for
+        queries."""
         load_settings = self.test_config.load_settings
         load_settings.items /= 2
 
         iterator = TargetIterator(self.cluster_spec, self.test_config, 'n1ql')
         self.load(load_settings, iterator)
-
         self.load(load_settings)
         self.wait_for_persistence()
         self.compact_bucket()
@@ -122,48 +102,26 @@ class N1QLLatencyTest(N1QLTest):
         self.workload.items /= 2
         self.workload.n1ql_queries = getattr(self, 'n1ql_queries',
                                              self.workload.n1ql_queries)
+        self.access_bg(access_settings=self.workload)
+        self.access(access_settings=self.workload)
 
-        self.access_bg(self.workload)
-        self.access(self.workload)
+        self.report_kpi()
 
-        if self.test_config.stats_settings.enabled:
-            self.reporter.post_to_sf(
-                *self.metric_helper.calc_query_latency(percentile=80)
-            )
+
+class N1QLLatencyTest(N1QLTest):
+
+    def _report_kpi(self):
+        self.reporter.post_to_sf(
+            *self.metric_helper.calc_query_latency(percentile=80)
+        )
 
 
 class N1QLThroughputTest(N1QLTest):
 
-    def __init__(self, *args, **kwargs):
-        super(N1QLThroughputTest, self).__init__(*args, **kwargs)
-
-    def run(self):
-        load_settings = self.test_config.load_settings
-        load_settings.items /= 2
-
-        iterator = TargetIterator(self.cluster_spec, self.test_config, 'n1ql')
-        self.load(load_settings, iterator)
-
-        self.load(load_settings)
-        self.wait_for_persistence()
-        self.compact_bucket()
-
-        self.build_index()
-        if self.test_config.access_settings.n1ql_op != "ryow":
-            self._create_prepared_statements()
-
-        self.workload = self.test_config.access_settings
-        self.workload.items /= 2
-        self.workload.n1ql_queries = getattr(self, 'n1ql_queries',
-                                             self.workload.n1ql_queries)
-
-        self.access_bg(self.workload)
-        self.access(self.workload)
-
-        if self.test_config.stats_settings.enabled:
-            self.reporter.post_to_sf(
-                *self.metric_helper.calc_avg_n1ql_queries()
-            )
+    def _report_kpi(self):
+        self.reporter.post_to_sf(
+            *self.metric_helper.calc_avg_n1ql_queries()
+        )
 
 
 class N1QLThroughputLatencyTest(N1QLTest):

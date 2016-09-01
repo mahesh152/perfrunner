@@ -26,7 +26,23 @@ class CreateData(object):
             l = list(tfile1)
             shuffle(l)
             b = itertools.cycle(l)
+            count = 0
+            for c in tfile:
+                term, freq = c.split()
+                term1, freq = b.next().split()
+                print term1, term, term
+                count += 1
+            tfile.close()
 
+            tfile = open(file1, 'r')
+            for c in tfile:
+                term, freq = c.split()
+                term1, freq = b.next().split()
+                print term1, term, term
+
+            tfile.close()
+
+            tfile = open(file1, 'r')
             for c in tfile:
                 term, freq = c.split()
                 term1, freq = b.next().split()
@@ -152,6 +168,9 @@ class CreateData(object):
             cb = Bucket('couchbase://172.23.123.38/bucket-1', password='password')
             row_iter = cb.n1ql_query(N1QLQuery('select meta().id from `bucket-1` limit 10000'))
             for resultid in row_iter:
+                '''
+                use following to create the docids set
+                '''
                 print resultid["id"], None
 
         @staticmethod
@@ -188,17 +207,34 @@ class CreateData(object):
             '''
             pass
 
+        @staticmethod
+        def generatedates(file1):
+            dates = ['2013-10-17', '2013-11-17', '2014-02-09', '2015-11-26']
+            start = 0
+            end = 0
+            file = open(file1, 'r')
+            for c in file:
+                term, freq = c.split()
+                if end == 4:
+                    start += 1
+                    if start == 4:
+                        start = 0
+                    end = start
+                sd = dates[start]
+                ed = dates[end]
+                end += 1
+                print term, ':'.join([sd, ed])
+            file.close()
 
 '''
     #AndHighOrMedMed
     #AndMedOrHighHigh
-    CreateData.createandor('midterm.txt', 'hiterm.txt')
+    CreateData.createandor('hiterm.txt', 'midterm.txt')
     CreateData.createprefix('midterm.txt')
     CreateData.createwildcard('midterm.txt')
     CreateData.createnumeric('midterm.txt')
     CreateData.createids()
     CreateData.changefiles()
     CreateData.createfuzzy('midterm.txt', 1)
+    CreateData.generatedates('hiterm.txt')
 '''
-
-CreateData.createprefix('midterm.txt')
