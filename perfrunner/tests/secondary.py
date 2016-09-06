@@ -371,7 +371,6 @@ class SecondaryIndexingThroughputTest(SecondaryIndexTest):
     def apply_scanworkload(self):
         rest_username, rest_password = self.cluster_spec.rest_credentials
         logger.info('Initiating scan workload')
-        numindexes = None
         numindexes = len(self.indexes)
 
         if self.test_config.secondaryindex_settings.stale == 'false':
@@ -386,7 +385,6 @@ class SecondaryIndexingThroughputTest(SecondaryIndexTest):
                 else:
                     self.configfile = 'scripts/config_scanthr_sessionconsistent_multiple_fdb.json'
         else:
-
             if numindexes == 1:
                 if self.secondaryDB == 'memdb':
                     self.configfile = 'scripts/config_scanthr_moi.json'
