@@ -201,7 +201,7 @@ def cleanup_remote_workdir():
 
 
 def main():
-    xml_url = find_manifest() if args.manifest_url is None else args.manifest_url
+    xml_url = find_manifest() if not args.manifest_url else args.manifest_url
     xml_data = fetch_url(xml_url)
     remote, branch, fdb_hash = hash_from_xml(xml_data)
 
