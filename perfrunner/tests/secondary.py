@@ -293,7 +293,6 @@ class InitialandIncrementalSecondaryIndexRebalanceTest(InitialandIncrementalSeco
         time_elapsed = self.reporter.finish('Incremental secondary index', time_elapsed)
         self.report_kpi(time_elapsed, 'Incremental')
 
-class InitialandIncrementalSecondaryIndexRebalanceMaheshTest(InitialandIncrementalSecondaryIndexTest):
 
 class SecondaryIndexingThroughputTest(SecondaryIndexTest):
     """
