@@ -1,8 +1,8 @@
 [test_case]
 test = perfrunner.tests.n1ql.N1QLLatencyTest
-title = Q1, Key-Value Lookup, 20M docs, 14.4KGops, 3.6KSops, 20KQops
-summary = Key-Value Lookup, 14.4KGops, 3.6KSops, 20KQops
-larger_is_better = false
+title = Q1, Key-Value Lookup, 20K queries/sec
+component = n1ql
+category = Q1_Q3_lat
 
 [cluster]
 mem_quota = 20480
@@ -12,20 +12,12 @@ num_buckets = 1
 
 [secondary]
 indexer.settings.storage_mode = forestdb
-indexer.settings.compaction.min_size = 1048576
-indexer.settings.persisted_snapshot.interval = 3000
-indexer.settings.wal_size = 40960
-indexer.settings.maxVbQueueLength = 10000
-indexer.settings.max_cpu_percent = 2400
-indexer.settings.scan_timeout = 0
-indexer.settings.gc_percent = 200
 
 [load]
 items = 20000000
 size = 1024
 workers = 80
 doc_gen = reverse_lookup
-doc_partitions = 1
 
 [access]
 creates = 0

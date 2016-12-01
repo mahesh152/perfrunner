@@ -33,11 +33,11 @@ class WorkloadSettings(object):
 
         self.operations = False
         self.fts_config = None
+        self.fts_updates = 0
 
         self.index_type = None
         self.ddocs = {}
         self.qparams = {}
-        self.n1ql = False
 
 
 class TargetSettings(object):

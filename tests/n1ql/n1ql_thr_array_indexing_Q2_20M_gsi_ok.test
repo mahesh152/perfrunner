@@ -1,8 +1,8 @@
 [test_case]
 test = perfrunner.tests.n1ql.N1QLThroughputTest
-title = Q2 Array Indexing, Singleton Unique Lookup, 20M docs, 14.4KGops, 3.6KSops, GSI, not_bounded
-summary = Singleton Unique Lookup, 14.4KGops, 3.6KSops
-larger_is_better = true
+title = Q2 Array Indexing, Singleton Unique Lookup, FDB, not_bounded
+component = n1ql
+category = array
 
 [cluster]
 mem_quota = 20480
@@ -12,20 +12,14 @@ num_buckets = 1
 
 [secondary]
 indexer.settings.storage_mode = forestdb
-indexer.settings.compaction.min_size = 1048576
-indexer.settings.persisted_snapshot.interval = 3000
 indexer.settings.wal_size = 40960
-indexer.settings.maxVbQueueLength = 10000
-indexer.settings.max_cpu_percent = 2400
-indexer.settings.scan_timeout = 0
 indexer.settings.gc_percent = 200
 
 [load]
 items = 20000000
 size = 1024
 workers = 80
-doc_gen = reverse_lookup_array_indexing
-doc_partitions = 1
+doc_gen = array_indexing
 
 [n1ql]
 indexes =
@@ -41,7 +35,6 @@ items = 20000000
 workers = 20
 time = 1200
 n1ql_queries = singleton-unique-lookup
-n1ql_throughput = 1000000
 n1ql_workers = 128
 
 [n1ql-singleton-unique-lookup]

@@ -1,11 +1,10 @@
 import glob
 from unittest import TestCase
 
-from cbagent.settings import Settings
 from perfrunner.helpers.misc import server_group
 from perfrunner.settings import ClusterSpec, TestConfig
 from perfrunner.workloads.tcmalloc import KeyValueIterator, LargeIterator
-from spring.docgen import NewDocument
+from spring.docgen import Document
 from spring.wgen import Worker
 
 
@@ -67,8 +66,6 @@ class SettingsTest(TestCase):
         for file_name in glob.glob("clusters/*.spec"):
             cluster_spec = ClusterSpec()
             cluster_spec.parse(file_name, override=())
-            self.assertIn(cluster_spec.parameters['Platform'],
-                          ('HW', 'Virtual', 'Localhost'))
 
 
 class WorkloadTest(TestCase):
@@ -87,14 +84,8 @@ class WorkloadTest(TestCase):
         self.assertAlmostEqual(size, LargeIterator.FIELD_SIZE, delta=16)
 
 
-class CBAgentTest(TestCase):
-
-    def test_settings(self):
-        self.assertEqual(Settings.DEFAULT['interval'], 10)
-
-
 class SpringTest(TestCase):
 
     def spring_imports(self):
-        self.assertEqual(NewDocument.SIZE_VARIATION, 0.25)
+        self.assertEqual(Document.SIZE_VARIATION, 0.25)
         self.assertEqual(Worker.BATCH_SIZE, 100)

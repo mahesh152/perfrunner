@@ -21,9 +21,11 @@ from cbagent.collectors import (
     Net,
     NSServer,
     ObserveLatency,
+    ObserveSecondaryIndexLatency,
     ReservoirN1QLLatency,
     SecondaryDebugStats,
     SecondaryDebugStatsBucket,
+    SecondaryDebugStatsIndex,
     SecondaryLatencyStats,
     SecondaryStats,
     SpringLatency,
@@ -37,6 +39,7 @@ from cbagent.collectors.secondary_debugstats import SecondaryDebugStatsIndex
 from cbagent.metadata_client import MetadataClient
 from perfrunner.helpers.misc import target_hash, uhex
 from perfrunner.helpers.remote import RemoteHelper
+from perfrunner.settings import StatsSettings
 
 
 @decorator
@@ -58,9 +61,8 @@ def with_stats(method, *args, **kwargs):
     if stats_enabled:
         test.cbagent.stop()
         test.cbagent.reconstruct()
-        if test.test_config.stats_settings.add_snapshots:
-            test.cbagent.add_snapshot(method.__name__, from_ts, to_ts)
-            test.snapshots = test.cbagent.snapshots
+        test.cbagent.add_snapshot(method.__name__, from_ts, to_ts)
+        test.snapshots = test.cbagent.snapshots
 
     from_ts = timegm(from_ts.timetuple()) * 1000  # -> ms
     to_ts = timegm(to_ts.timetuple()) * 1000  # -> ms
@@ -96,14 +98,14 @@ class CbAgent(object):
             hostnames = None
 
         self.settings = type('settings', (object,), {
-            'seriesly_host': test.test_config.stats_settings.seriesly['host'],
-            'cbmonitor_host_port': test.test_config.stats_settings.cbmonitor['host'],
+            'seriesly_host': StatsSettings.SERIESLY,
+            'cbmonitor_host_port': StatsSettings.CBMONITOR,
             'interval': test.test_config.stats_settings.interval,
             'secondary_statsfile': test.test_config.stats_settings.secondary_statsfile,
             'buckets': buckets,
             'indexes': test.test_config.secondaryindex_settings.indexes,
             'hostnames': hostnames,
-            'fts_server': test.test_config.test_case.fts_server
+            'monitored_processes': test.test_config.stats_settings.monitored_processes,
         })()
         self.lat_interval = test.test_config.stats_settings.lat_interval
         if test.cluster_spec.ssh_credentials:
@@ -128,6 +130,7 @@ class CbAgent(object):
                            n1ql_latency=False,
                            n1ql_stats=False,
                            index_latency=False,
+                           secondary_index_latency=False,
                            persist_latency=False,
                            replicate_latency=False,
                            xdcr_lag=False,
@@ -175,6 +178,8 @@ class CbAgent(object):
             self.prepare_n1ql_stats(clusters)
         if index_latency:
             self.prepare_index_latency(clusters)
+        if secondary_index_latency:
+            self.prepare_secondary_index_latency(clusters)
         if persist_latency:
             self.prepare_persist_latency(clusters)
         if replicate_latency:
@@ -312,6 +317,14 @@ class CbAgent(object):
             settings.observe = 'index'
             self.collectors.append(ObserveLatency(settings))
 
+    def prepare_secondary_index_latency(self, clusters):
+        for i, cluster in enumerate(clusters):
+            settings = copy(self.settings)
+            settings.cluster = cluster
+            settings.master_node = self.clusters[cluster]
+            settings.observe = 'secondary_index'
+            self.collectors.append(ObserveSecondaryIndexLatency(settings))
+
     def prepare_xdcr_lag(self, clusters, test):
         reversed_clusters = list(reversed(self.clusters.keys()))
         for i, cluster in enumerate(clusters):
@@ -419,6 +432,7 @@ class CbAgent(object):
         for cluster in clusters:
             settings = copy(self.settings)
             settings.cluster = cluster
+            settings.interval = self.lat_interval
             settings.master_node = self.clusters[cluster]
             self.fts_stats = ElasticStats(settings, test)
             self.collectors.append(

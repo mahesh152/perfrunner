@@ -1,8 +1,8 @@
 [test_case]
 test = perfrunner.tests.n1ql.N1QLLatencyTest
-title = Q3, Range Scan, 20M docs, 14.4KGops, 3.6KSops, 960Qops, GSI, not_bounded
-summary = Range Scan, 14.4KGops, 3.6KSops, 960Qops
-larger_is_better = false
+title = Q3, Range Scan, 960 queries/sec, FDB, not_bounded
+component = n1ql
+category = Q1_Q3_lat
 
 [stats]
 lat_interval = 0.2
@@ -15,12 +15,7 @@ num_buckets = 1
 
 [secondary]
 indexer.settings.storage_mode = forestdb
-indexer.settings.compaction.min_size = 1048576
-indexer.settings.persisted_snapshot.interval = 3000
 indexer.settings.wal_size = 40960
-indexer.settings.maxVbQueueLength = 10000
-indexer.settings.max_cpu_percent = 2400
-indexer.settings.scan_timeout = 0
 indexer.settings.gc_percent = 200
 
 [load]
@@ -28,7 +23,6 @@ items = 20000000
 size = 1024
 workers = 80
 doc_gen = reverse_lookup
-doc_partitions = 1
 
 [n1ql]
 indexes =

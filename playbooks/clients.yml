@@ -9,6 +9,7 @@
       - atop
       - cpufrequtils
       - git
+      - golang-go
       - htop
       - libffi-dev
       - libssl-dev

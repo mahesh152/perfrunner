@@ -23,8 +23,7 @@ class Iterator(object):
     def add_prefix(self, key):
         if self.prefix:
             return '%s-%s' % (self.prefix, key)
-        else:
-            return key
+        return key
 
 
 class ExistingKey(Iterator):
@@ -124,7 +123,18 @@ class KeyForCASUpdate(Iterator):
         return self.add_prefix(key)
 
 
-class NewDocument(Iterator):
+class FTSKey(Iterator):
+
+    def __init__(self, ws):
+        self.mutate_items = 0
+        if ws.fts_config:
+            self.mutate_items = ws.fts_config.mutate_items
+
+    def next(self):
+        return hex(random.randint(0, self.mutate_items))[2:]
+
+
+class Document(Iterator):
 
     SIZE_VARIATION = 0.25  # 25%
 
@@ -203,7 +213,7 @@ class NewDocument(Iterator):
         return int(alphabet[41], 16) % 3
 
     @staticmethod
-    def _build_achievements(alphabet, key=None):
+    def _build_achievements(alphabet):
         return build_achievements(alphabet) or [0]
 
     @staticmethod
@@ -221,6 +231,7 @@ class NewDocument(Iterator):
     def next(self, key):
         alphabet = self._build_alphabet(key)
         size = self._size()
+
         return {
             'name': self._build_name(alphabet),
             'email': self._build_email(alphabet),
@@ -229,17 +240,17 @@ class NewDocument(Iterator):
             'realm': self._build_realm(alphabet),
             'coins': self._build_coins(alphabet),
             'category': self._build_category(alphabet),
-            'achievements': self._build_achievements(alphabet, key),
+            'achievements': self._build_achievements(alphabet),
             'body': self._build_body(alphabet, size),
         }
 
 
-class NewNestedDocument(NewDocument):
+class NestedDocument(Document):
 
     OVERHEAD = 450  # Minimum size due to static fields, body size is variable
 
     def __init__(self, avg_size):
-        super(NewNestedDocument, self).__init__(avg_size)
+        super(NestedDocument, self).__init__(avg_size)
         self.capped_field_value = {}
 
     def _size(self):
@@ -254,6 +265,7 @@ class NewNestedDocument(NewDocument):
     def next(self, key):
         alphabet = self._build_alphabet(key)
         size = self._size()
+
         return {
             'name': {'f': {'f': {'f': self._build_name(alphabet)}}},
             'email': {'f': {'f': self._build_email(alphabet)}},
@@ -274,13 +286,13 @@ class NewNestedDocument(NewDocument):
         }
 
 
-class NewLargeDocument(NewNestedDocument):
+class LargeDocument(NestedDocument):
 
     def next(self, key):
         alphabet = self._build_alphabet(key)
         return {
-            'nest1': super(NewLargeDocument, self).next(key),
-            'nest2': super(NewNestedDocument, self).next(key),
+            'nest1': super(LargeDocument, self).next(key),
+            'nest2': super(NestedDocument, self).next(key),
             'name': self._build_name(alphabet),
             'email': self._build_email(alphabet),
             'alt_email': self._build_alt_email(alphabet),
@@ -292,12 +304,12 @@ class NewLargeDocument(NewNestedDocument):
         }
 
 
-class ReverseLookupDocument(NewNestedDocument):
+class ReverseLookupDocument(NestedDocument):
 
-    def __init__(self, avg_size, partitions, is_random=True):
+    def __init__(self, avg_size, prefix):
         super(ReverseLookupDocument, self).__init__(avg_size)
-        self.partitions = partitions
-        self.is_random = is_random
+        self.prefix = prefix
+        self.is_random = prefix != 'n1ql'
 
     def build_email(self, alphabet):
         if self.is_random:
@@ -305,23 +317,22 @@ class ReverseLookupDocument(NewNestedDocument):
         else:
             return self._build_email(alphabet)
 
-    def _build_partition(self, alphabet, seq_id):
-        return seq_id % self.partitions
-
-    def _capped_field(self, alphabet, prefix, seq_id, num_unique):
+    def _build_capped(self, alphabet, seq_id, num_unique):
         if self.is_random:
             offset = random.randint(1, 9)
             return '%s' % alphabet[offset:offset + 6]
 
-        index = (seq_id % self.partitions) + \
-            self.partitions * (seq_id / (self.partitions * num_unique))
-        return '%s_%s_%s' % (prefix, num_unique, index)
+        index = seq_id / num_unique
+        return '%s_%s_%s' % (self.prefix, num_unique, index)
+
+    def _build_topics(self, seq_id):
+        return []
 
     def next(self, key):
-        seq_id = int(key[-12:]) + 1
-        prefix = key[:-12]
         alphabet = self._build_alphabet(key)
         size = self._size()
+        seq_id = int(key[-12:]) + 1
+
         return {
             'name': self._build_name(alphabet),
             'email': self.build_email(alphabet),
@@ -335,56 +346,214 @@ class ReverseLookupDocument(NewNestedDocument):
             'realm': self._build_realm(alphabet),
             'coins': self._build_coins(alphabet),
             'category': self._build_category(alphabet),
-            'achievements': self._build_achievements(alphabet, key),
+            'achievements': self._build_achievements(alphabet),
             'gmtime': self._build_gmtime(alphabet),
             'year': self._build_year(alphabet),
             'body': self._build_body(alphabet, size),
-            'capped_small': self._capped_field(alphabet, prefix, seq_id, 100),
-            'partition_id': self._build_partition(alphabet, seq_id),
+            'capped_small': self._build_capped(alphabet, seq_id, 100),
+            'topics': self._build_topics(seq_id),
         }
 
 
-class ReverseLookupDocumentArrayIndexing(ReverseLookupDocument):
+class ReverseRangeLookupDocument(ReverseLookupDocument):
 
-    num_docs = 0
-    delta = 0
+    def __init__(self, avg_size, prefix, range_distance):
+        super(ReverseRangeLookupDocument, self).__init__(avg_size, prefix)
+        if self.prefix is None:
+            self.prefix = ""
+        # Keep one extra as query runs from greater than 'x' to less than 'y' both exclusive
+        self.distance = range_distance + 1
 
-    def __init__(self, avg_size, partitions, num_docs, delta=0):
-        super(ReverseLookupDocumentArrayIndexing, self).__init__(avg_size, partitions)
-        ReverseLookupDocumentArrayIndexing.num_docs = num_docs
-        ReverseLookupDocumentArrayIndexing.delta = delta
+    def _build_capped(self, alphabet, seq_id, num_unique):
+        if self.is_random:
+            offset = random.randint(1, 9)
+            return '%s' % alphabet[offset:offset + 6]
 
-    @staticmethod
-    def _build_achievements1(alphabet, key):
-        spl = key.split('-')
-        if spl[0] == 'n1ql':
-            # these docs are never updated
-            return [((int(spl[1].lstrip('0')) - 1) * 10 + i +
-                     ReverseLookupDocumentArrayIndexing.delta) for i in range(10)]
-        else:
-            # these docs are involved in updating
-            return [((int(spl[1].lstrip('0')) - 1) * 10 + i +
-                     ReverseLookupDocumentArrayIndexing.num_docs * 10 +
-                     ReverseLookupDocumentArrayIndexing.delta) for i in range(10)]
-
-    @staticmethod
-    def _build_achievements2(alphabet, key):
-        spl = key.split('-')
-        if spl[0] == 'n1ql':
-            # these docs are never updated
-            return [((int(spl[1].lstrip('0')) // 100) * 10 + i +
-                     ReverseLookupDocumentArrayIndexing.delta) for i in range(10)]
-        else:
-            # these docs are involved in updating
-            return [((int(spl[1].lstrip('0')) // 100) * 10 + i +
-                     ReverseLookupDocumentArrayIndexing.num_docs * 10 +
-                     ReverseLookupDocumentArrayIndexing.delta) for i in range(10)]
+        index = seq_id / num_unique
+        return '%s_%s_%12s' % (self.prefix, num_unique, index)
 
     def next(self, key):
-        seq_id = int(key[-12:]) + 1
-        prefix = key[:-12]
         alphabet = self._build_alphabet(key)
         size = self._size()
+        seq_id = int(key[-12:]) + 1
+
+        return {
+            'name': self._build_name(alphabet),
+            'email': self.build_email(alphabet),
+            'alt_email': self._build_alt_email(alphabet),
+            'street': self._build_street(alphabet),
+            'city': self._build_city(alphabet),
+            'county': self._build_county(alphabet),
+            'state': self._build_state(alphabet),
+            'full_state': self._build_full_state(alphabet),
+            'country': self._build_country(alphabet),
+            'realm': self._build_realm(alphabet),
+            'coins': self._build_coins(alphabet),
+            'category': self._build_category(alphabet),
+            'achievements': self._build_achievements(alphabet),
+            'gmtime': self._build_gmtime(alphabet),
+            'year': self._build_year(alphabet),
+            'body': self._build_body(alphabet, size),
+            'capped_small': self._build_capped(alphabet, seq_id, 100),
+            'capped_small_range': self._build_capped(alphabet, seq_id + (self.distance * 100), 100),
+            'topics': self._build_topics(seq_id),
+        }
+
+
+class ExtReverseLookupDocument(ReverseLookupDocument):
+
+    OVERHEAD = 650
+
+    def __init__(self, avg_size, prefix, num_docs):
+        super(ExtReverseLookupDocument, self).__init__(avg_size, prefix)
+        self.num_docs = num_docs
+
+    def _build_topics(self, seq_id):
+        """1:4 reference to JoinedDocument keys."""
+        return [
+            self.add_prefix('%012d' % ((seq_id + 11) % self.num_docs)),
+            self.add_prefix('%012d' % ((seq_id + 19) % self.num_docs)),
+            self.add_prefix('%012d' % ((seq_id + 23) % self.num_docs)),
+            self.add_prefix('%012d' % ((seq_id + 29) % self.num_docs)),
+        ]
+
+
+class JoinedDocument(ReverseLookupDocument):
+
+    def __init__(self, avg_size, prefix, num_docs, num_categories, num_replies):
+        super(JoinedDocument, self).__init__(avg_size, prefix)
+        self.num_categories = num_categories
+        self.num_docs = num_docs
+        self.num_replies = num_replies
+
+    def _build_owner(self, seq_id):
+        """4:1 reference to ReverseLookupDocument keys."""
+        ref_id = seq_id % (self.num_docs / 4)
+        return self.add_prefix('%012d' % ref_id)
+
+    def _build_title(self, alphabet):
+        return alphabet[:32]
+
+    def _build_categories(self, seq_id):
+        """1:4 reference to RefDocument keys."""
+        return [
+            self.add_prefix('%012d' % ((seq_id + 11) % self.num_categories)),
+            self.add_prefix('%012d' % ((seq_id + 19) % self.num_categories)),
+            self.add_prefix('%012d' % ((seq_id + 23) % self.num_categories)),
+            self.add_prefix('%012d' % ((seq_id + 29) % self.num_categories)),
+        ]
+
+    def _build_user(self, seq_id, idx):
+        return self.add_prefix('%012d' % ((seq_id + idx + 537) % self.num_docs))
+
+    def _build_replies(self, seq_id):
+        """1:N references to ReverseLookupDocument keys."""
+        return [
+            {'user': self._build_user(seq_id, idx)}
+            for idx in range(self.num_replies)
+        ]
+
+    def next(self, key):
+        alphabet = self._build_alphabet(key)
+        seq_id = int(key[-12:])
+
+        return {
+            'owner': self._build_owner(seq_id),
+            'title': self._build_title(alphabet),
+            'capped': self._build_capped(alphabet, seq_id, 100),
+            'categories': self._build_categories(seq_id),
+            'replies': self._build_replies(seq_id),
+        }
+
+
+class RefDocument(ReverseLookupDocument):
+
+    def _build_ref_name(self, seq_id):
+        return self.add_prefix('%012d' % seq_id)
+
+    def next(self, key):
+        seq_id = int(key[-12:])
+
+        return {
+            'name': self._build_ref_name(seq_id),
+        }
+
+
+class ArrayIndexingDocument(ReverseLookupDocument):
+
+    """ArrayIndexingDocument extends ReverseLookupDocument by adding two new
+    fields achievements1 and achievements2.
+
+    achievements1 is a variable-length array (default length is 10). Every
+    instance of achievements1 is unique. This field is useful for single lookups.
+
+    achievements2 is a fixed-length array. Each instance of achievements2 is
+    repeated 100 times (ARRAY_CAP). This field is useful for range queries.
+    """
+
+    ARRAY_CAP = 100
+
+    ARRAY_SIZE = 10
+
+    def __init__(self, avg_size, prefix, array_size, num_docs):
+        super(ArrayIndexingDocument, self).__init__(avg_size, prefix)
+        self.array_size = array_size
+        self.num_docs = num_docs
+
+    def _build_achievements1(self, seq_id):
+        """Every document reserves a range of numbers that can be used for a
+        new array.
+
+        The left side of range is always based on sequential document ID.
+
+        Random arrays make a few additional steps:
+        * The range is shifted by the total number of documents so that static (
+        non-random) and random documents do not overlap.
+        * The range is doubled so that it's possible vary elements in a new
+        array.
+        * The left side of range is randomly shifted.
+
+        Here is an example of a new random array for seq_id=7, total 100
+        documents and 10 elements in array:
+            1) offset is set to 1000.
+            2) offset is incremented by 140.
+            3) offset is incremented by a random number (e.g., 5).
+            4) [1145, 1146, 1147, 1148, 1149, 1150, 1151, 1152, 1153, 1154]
+        array is generated.
+
+        Steps for seq_id=8 are the following:
+            1) offset is set to 1000.
+            2) offset is incremented by 160.
+            3) offset is incremented by a random number (e.g., 2).
+           4) [1162, 1163, 1164, 1165, 1166, 1167, 1168, 1169, 1170, 1171]
+        array is generated.
+        """
+        offset = seq_id * self.array_size
+        if self.is_random:
+            offset = self.num_docs * self.array_size
+            offset += 2 * seq_id * self.array_size
+            offset += random.randint(1, self.array_size)
+
+        return [offset + i for i in range(self.array_size)]
+
+    def _build_achievements2(self, seq_id):
+        """achievements2 is very similar to achievements1. However, in case of
+        achievements2 ranges overlap so that multiple documents case satisfy the
+        same queries. Overlapping is achieving by integer division using
+        ARRAY_CAP constant.
+        """
+        offset = seq_id / self.ARRAY_CAP * self.ARRAY_SIZE
+        if self.is_random:
+            offset = self.num_docs * self.ARRAY_SIZE
+            offset += (2 * seq_id) / self.ARRAY_CAP * self.ARRAY_SIZE
+            offset += random.randint(1, self.ARRAY_SIZE)
+
+        return [offset + i for i in range(self.ARRAY_SIZE)]
+
+    def next(self, key):
+        alphabet = self._build_alphabet(key)
+        size = self._size()
+        seq_id = int(key[-12:]) + 1
 
         return {
             'name': self._build_name(alphabet),
@@ -399,11 +568,197 @@ class ReverseLookupDocumentArrayIndexing(ReverseLookupDocument):
             'realm': self._build_realm(alphabet),
             'coins': self._build_coins(alphabet),
             'category': self._build_category(alphabet),
-            'achievements1': self._build_achievements1(alphabet, key),
-            'achievements2': self._build_achievements2(alphabet, key),
+            'achievements1': self._build_achievements1(seq_id),
+            'achievements2': self._build_achievements2(seq_id),
             'gmtime': self._build_gmtime(alphabet),
             'year': self._build_year(alphabet),
             'body': self._build_body(alphabet, size),
-            'capped_small': self._capped_field(alphabet, prefix, seq_id, 100),
-            'partition_id': self._build_partition(alphabet, seq_id),
+            'capped_small': self._build_capped(alphabet, seq_id, 100),
+            'topics': self._build_topics(seq_id),
+        }
+
+
+class ImportExportDocument(ReverseLookupDocument):
+    """ImportExportDocument extends ReverseLookupDocument by adding
+     25 fields with random size
+    """
+    OVERHEAD = 1022
+
+    def next(self, key):
+        seq_id = int(key[-12:]) + 1
+        alphabet = self._build_alphabet(key)
+        size = self._size()
+        return {
+            'name': self._build_name(alphabet) * random.randint(0, 5),
+            'email': self.build_email(alphabet) * random.randint(0, 5),
+            'alt_email': self._build_alt_email(
+                alphabet) * random.randint(0, 5),
+            'street': self._build_street(alphabet) * random.randint(0, 9),
+            'city': self._build_city(alphabet) * random.randint(0, 9),
+            'county': self._build_county(alphabet) * random.randint(0, 5),
+            'state': self._build_state(alphabet) * random.randint(0, 5),
+            'full_state': self._build_full_state(
+                alphabet) * random.randint(0, 5),
+            'country': self._build_country(
+                alphabet) * random.randint(0, 5),
+            'realm': self._build_realm(
+                alphabet) * random.randint(0, 9),
+            'alt_street': self._build_street(
+                alphabet) * random.randint(0, 9),
+            'alt_city': self._build_city(
+                alphabet) * random.randint(0, 9),
+            'alt_county': self._build_county(
+                alphabet) * random.randint(0, 5),
+            'alt_state': self._build_state(
+                alphabet) * random.randint(0, 5),
+            'alt_full_state': self._build_full_state(
+                alphabet) * random.randint(0, 5),
+            'alt_country': self._build_country(
+                alphabet) * random.randint(0, 5),
+            'alt_realm': self._build_realm(
+                alphabet) * random.randint(0, 9),
+            'coins': self._build_coins(
+                alphabet) * random.randint(0, 999),
+            'category': self._build_category(
+                alphabet) * random.randint(0, 5),
+            'achievements': self._build_achievements(alphabet),
+            'gmtime': self._build_gmtime(alphabet) * random.randint(0, 9),
+            'year': self._build_year(alphabet) * random.randint(0, 5),
+            'body': self._build_body(alphabet, size),
+            'capped_small': self._build_capped(
+                alphabet, seq_id, 100) * random.randint(0, 5),
+            'alt_capped_small': self._build_capped(
+                alphabet, seq_id, 100) * random.randint(0, 5),
+        }
+
+
+class ImportExportDocumentArray(ImportExportDocument):
+    """ImportExportDocumentArray extends ImportExportDocument by adding array docs as:
+     25 fields of random size. Have an array with at least 10 items in five fields.
+    """
+
+    OVERHEAD = 0
+
+    def _random_array(self, value, num):
+        if value == '':
+            return []
+        l = len(value)
+        if l < num:
+            return [value] * 5
+        scope = sorted(random.sample(range(l), num))
+        result = [value[0 if i == 0 else scope[i - 1]:i + scope[i]] for i in xrange(num)]
+        return result
+
+    def next(self, key):
+        seq_id = int(key[-12:]) + 1
+        alphabet = self._build_alphabet(key)
+        size = self._size()
+
+        # 25 Fields of random size. Have an array with at least 10 items in five fields.
+        return {
+            'name': self._random_array(self._build_name(
+                alphabet) * random.randint(0, 9), 5),
+            'email': self.build_email(
+                alphabet) * random.randint(0, 5),
+            'alt_email': self._build_alt_email(
+                alphabet) * random.randint(0, 9),
+            'street': self._random_array(self._build_street(
+                alphabet) * random.randint(0, 9), 5),
+            'city': self._random_array(self._build_city(
+                alphabet) * random.randint(0, 9), 5),
+            'county': self._random_array(self._build_county(
+                alphabet) * random.randint(0, 9), 5),
+            'state': self._random_array(self._build_state(
+                alphabet) * random.randint(0, 9), 5),
+            'full_state': self._random_array(self._build_full_state(
+                alphabet) * random.randint(0, 9), 5),
+            'country': self._random_array(self._build_country(
+                alphabet) * random.randint(0, 9), 5),
+            'realm': self._build_realm(alphabet) * random.randint(0, 9),
+            'alt_street': self._random_array(self._build_street(
+                alphabet) * random.randint(0, 9), 5),
+            'alt_city': self._random_array(self._build_city(
+                alphabet) * random.randint(0, 9), 5),
+            'alt_county': self._build_county(
+                alphabet) * random.randint(0, 9),
+            'alt_state': self._build_state(
+                alphabet) * random.randint(0, 9),
+            'alt_full_state': self._build_full_state(
+                alphabet) * random.randint(0, 9),
+            'alt_country': self._build_country(
+                alphabet) * random.randint(0, 9),
+            'alt_realm': self._build_realm(
+                alphabet) * random.randint(0, 9),
+            'coins': self._build_coins(
+                alphabet) * random.randint(0, 999),
+            'category': self._build_category(
+                alphabet) * random.randint(0, 9),
+            'achievements': self._build_achievements(alphabet),
+            'gmtime': self._build_gmtime(alphabet) * random.randint(0, 9),
+            'year': self._build_year(alphabet) * random.randint(0, 5),
+            'body': self._random_array(self._build_body(alphabet, size), 7),
+            'capped_small': self._build_capped(
+                alphabet, seq_id, 100) * random.randint(0, 5),
+            'alt_capped_small': self._build_capped(
+                alphabet, seq_id, 100) * random.randint(0, 5),
+        }
+
+
+class ImportExportDocumentNested(ImportExportDocument):
+    """ImportExportDocumentNested extends ImportExportDocument by adding nested docs as:
+     25 fields of random size. Nest each document. Five levels.
+    """
+
+    def next(self, key):
+        seq_id = int(key[-12:]) + 1
+        alphabet = self._build_alphabet(key)
+        size = self._size()
+
+        return {
+            'name': {'n': {'a': {'m': {'e': self._build_name(
+                alphabet) * random.randint(0, 3)}}}},
+            'email': {'e': {'m': {'a': {'i': self.build_email(
+                alphabet) * random.randint(0, 3)}}}},
+            'alt_email': {'a': {'l': {'t': {'e': self._build_alt_email(
+                alphabet) * random.randint(0, 3)}}}},
+            'street': {'s': {'t': {'r': {'e': self._build_street(
+                alphabet) * random.randint(0, 3)}}}},
+            'city': {'c': {'i': {'t': {'y': self._build_city(
+                alphabet) * random.randint(0, 3)}}}},
+            'county': {'c': {'o': {'u': {'n': self._build_county(
+                alphabet) * random.randint(0, 3)}}}},
+            'state': {'s': {'t': {'a': {'t': self._build_state(
+                alphabet) * random.randint(0, 3)}}}},
+            'full_state': {'f': {'u': {'l': {'l': self._build_full_state(
+                alphabet) * random.randint(0, 3)}}}},
+            'country': {'c': {'o': {'u': {'n': self._build_country(
+                alphabet) * random.randint(0, 3)}}}},
+            'realm': {'r': {'e': {'a': {'l': self._build_realm(
+                alphabet) * random.randint(0, 3)}}}},
+            'alt_street': {'a': {'l': {'t': {'s': self._build_street(
+                alphabet) * random.randint(0, 3)}}}},
+            'alt_city': {'a': {'l': {'t': {'c': self._build_city(
+                alphabet) * random.randint(0, 3)}}}},
+            'alt_county': {'e': {'m': {'a': {'i': self._build_county(
+                alphabet) * random.randint(0, 3)}}}},
+            'alt_state': {'e': {'m': {'a': {'i': self._build_state(
+                alphabet) * random.randint(0, 3)}}}},
+            'alt_full_state': {'e': {'m': {'a': {'i': self._build_full_state(
+                alphabet) * random.randint(0, 2)}}}},
+            'alt_country': {'e': {'m': {'a': {'i': self._build_country(
+                alphabet) * random.randint(0, 2)}}}},
+            'alt_realm': {'e': {'m': {'a': {'i': self._build_realm(
+                alphabet) * random.randint(0, 3)}}}},
+            'coins': {'e': {'m': {'a': {'i': self._build_coins(
+                alphabet) * random.randint(0, 99)}}}},
+            'category': {'e': {'m': {'a': {'i': self._build_category(
+                alphabet) * random.randint(0, 3)}}}},
+            'achievements': self._build_achievements(alphabet),
+            'gmtime': self._build_gmtime(alphabet) * random.randint(0, 2),
+            'year': self._build_year(alphabet) * random.randint(0, 2),
+            'body': self._build_body(alphabet, size),
+            'capped_small': self._build_capped(
+                alphabet, seq_id, 10) * random.randint(0, 2),
+            'alt_capped_small': self._build_capped(
+                alphabet, seq_id, 10) * random.randint(0, 2),
         }

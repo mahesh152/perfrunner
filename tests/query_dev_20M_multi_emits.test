@@ -1,8 +1,8 @@
 [test_case]
 test = perfrunner.tests.query.DevQueryLatencyTest
 title = 1 node, 20M docs, 3 views, 100 updates/sec, 100 queries/sec, stale=false, multiple emitted fields
-summary = Write-only query test, 1 node, 1 bucket x 20M x 1KB, 3 views, 100 sets/sec, 100 qps
-larger_is_better = false
+component = query
+category = by_type
 
 [cluster]
 mem_quota = 40960
@@ -19,7 +19,7 @@ db_percentage = 10
 items = 20000000
 size = 1024
 workers = 80
-doc_gen = new
+doc_gen = nested
 
 [index]
 index_type = multi_emits

@@ -1,8 +1,8 @@
 [test_case]
 test = perfdaily.master.n1ql.N1QLLatencyTestDaily
 title = Q2, Singleton Unique Lookup, latency, 5M docs, GSI, MOI, request_plus
-summary = Singleton Unique Lookup, 30KSops, 450Qops
-larger_is_better = false
+category = n1ql
+sub_category = MOI
 
 [cluster]
 mem_quota = 20480
@@ -26,7 +26,6 @@ items = 5000000
 size = 1024
 workers = 80
 doc_gen = reverse_lookup
-doc_partitions = 1
 
 [n1ql]
 indexes =
@@ -52,6 +51,4 @@ scan_consistency = request_plus
 args = ["{email}"]
 
 [dailyp]
-dailyp_category = n1ql
-dailyp_subcategory = MOI
 threshold = 20

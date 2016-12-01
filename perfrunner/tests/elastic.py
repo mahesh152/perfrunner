@@ -1,28 +1,25 @@
+import json
 import time
-
 import requests
 from logger import logger
 from requests.auth import HTTPBasicAuth
 
+
 from perfrunner.helpers.cbmonitor import with_stats
+from perfrunner.helpers.misc import get_json_from_file
 from perfrunner.helpers.rest import RestHelper
 from perfrunner.tests import PerfTest
 
 
 class Elastictest(PerfTest):
 
-    """
-    The most basic ELASTIC workflow:
-        Initial data load ->
-            Persistence and intra-cluster replication (for consistency) ->
-                Data compaction (for consistency) ->
-                    "Hot" load or working set warm up ->
-                        "access" phase or active workload
-    """
+    WAIT_TIME = 1
+    INDEX_WAIT_MAX = 1200
 
     def __init__(self, cluster_spec, test_config, verbose):
         super(Elastictest, self).__init__(cluster_spec, test_config, verbose)
 
+        self.index_definition = get_json_from_file(self.test_config.fts_settings.index_configfile)
         self.host_port = [x for x in self.cluster_spec.yield_servers()][0]
         self.host = self.host_port.split(':')[0]
         self.url = "{}:{}".format(self.host, "9200")
@@ -31,7 +28,6 @@ class Elastictest(PerfTest):
         self.elastic_index = self.test_config.fts_settings.name
         self.header = {'Content-Type': 'application/json'}
         self.requests = requests.session()
-        self.wait_time = 60
         self.elastic_doccount = self.test_config.fts_settings.items
         self.index_time_taken = 0
         '''
@@ -40,10 +36,10 @@ class Elastictest(PerfTest):
         '''
         self.index_url = "http://{}/{}".format(self.url, self.elastic_index)
         self.rest = RestHelper(cluster_spec)
-        self.orderbymetric = self.test_config.fts_settings.orderby
+        self.order_by = self.test_config.fts_settings.order_by
 
     @with_stats
-    def access(self):
+    def access(self, *args):
         super(Elastictest, self).timer()
 
     def access_bg_test(self):
@@ -53,23 +49,6 @@ class Elastictest(PerfTest):
         self.access()
 
     def addelastic(self):
-        '''
-        self.rest.add_remote_cluster(self.host_port, self.elastic_host_port, "Elastic")
-        The above API not working, throwing
-        File "/tmp/pip-build-qBV3Lp/requests/requests/models.py", line 597, in apparent_encoding
-          File "/tmp/pip-build-qBV3Lp/requests/requests/packages/charade/__init__.py", line 27, in detect
-        ImportError: cannot import name universaldetector Error
-
-        api='http://{}/pools/default/remoteClusters'.format(self.host_port)
-        print 'api is ', api
-        mydata = {'username': 'Administrator', 'password': 'password',
-                  'hostname': self.elastic_host_port, 'name': 'Elastic'}
-        print 'mydata', mydata
-        r=requests.post(url =api,
-            data=mydata,
-            auth=HTTPBasicAuth('Administrator', 'password'))
-        print 'status', r
-        '''
         requests.post(url='http://{}:8091/pools/default/remoteClusters'.format(self.host),
                           data={'username': 'Administrator', 'password': 'password',
                                 'hostname': '{}:9091'.format(self.host), 'name': 'Elastic'},
@@ -82,63 +61,57 @@ class Elastictest(PerfTest):
         if not resp.status_code == 200:
             raise RuntimeError("Failed to create rebalance")
 
-    def load(self):
+    def load(self, *args):
         logger.info('load/restore data to bucket')
         self.remote.cbrestorefts(self.test_config.fts_settings.storage, self.test_config.fts_settings.repo)
 
     def run(self):
+        self.cleanup_and_restore()
+        self.workload = self.test_config.access_settings
+        self.create_index()
+        self.addelastic()
+        self.wait_for_index()
+        self.access_bg_test()
+        self.report_kpi()
+
+    def cleanup_and_restore(self):
         self.delete_index()
         self.load()
         self.wait_for_persistence()
         self.compact_bucket()
-        self.workload = self.test_config.access_settings
 
     def delete_index(self):
-        logger.info('Deleting elasticsearch Index')
+        logger.info('Deleting Elasticsearch index')
         self.requests.delete(self.index_url)
 
     def create_index(self):
-        logger.info('Creating elastic search Index')
-        r = self.requests.put(self.index_url)
+        logger.info('Creating Elasticsearch index')
+        r = self.requests.put(self.index_url,
+                              data=json.dumps(self.index_definition, ensure_ascii=False))
         if not r.status_code == 200:
             logger.info("URL: %s" % self.index_url)
             logger.error(r.text)
-            raise RuntimeError("Failed to create elastic search index")
-        time.sleep(self.wait_time)
+            raise RuntimeError("Failed to create Elasticsearch index")
+        time.sleep(self.WAIT_TIME)
 
-    def wait_for_index(self, wait_interval=10, progress_interval=60):
-        logger.info(' Waiting for  ELasticSearch plugin Index to be completed')
-        last_reported = time.time()
-        '''
-         To avoid infinite loop in case hangs,
-         lastcount variable for that
-        '''
-        lastcount = 0
-        retry = 0
-        while True and (retry != 6):
-            r = self.requests.get(self.index_url + '/_count')
-            if not r.status_code == 200:
-                raise RuntimeError(
-                    "Failed to fetch document count of index. Status {}".format(r.status_code))
+    def wait_for_index(self):
+        logger.info(' Waiting for Elasticsearch index to be completed')
+        attempts = 0
+        while True:
+            r = self.requests.get(url=self.index_url + '/_count')
+            if r.status_code != 200:
+                raise RuntimeError("Failed to fetch document count of index. Status {}".format(r.status_code))
             count = int(r.json()['count'])
-            if lastcount >= count:
-                retry += 1
-                time.sleep(wait_interval * retry)
-                logger.info('count of documents :{} is same or less for retry {}'.
-                            format(count, retry))
-                continue
-            retry = 0
-            logger.info("Done at document count {}".format(count))
             if count >= self.elastic_doccount:
                 logger.info("Finished at document count {}".format(count))
                 return
-            check_report = time.time()
-            if check_report - last_reported >= progress_interval:
-                last_reported = check_report
-                logger.info("(progress) Document count is at {}".format(count))
-            lastcount = count
-        if lastcount != self.elastic_doccount:
-            raise RuntimeError("Failed to create Index")
+            else:
+                if not attempts % 10:
+                    logger.info("(progress) idexed documents count {}".format(count))
+                attempts += 1
+                time.sleep(self.WAIT_TIME)
+                if (attempts * self.WAIT_TIME) >= self.INDEX_WAIT_MAX:
+                    raise RuntimeError("Failed to create index")
 
 
 class ElasticIndexTest(Elastictest):
@@ -153,43 +126,35 @@ class ElasticIndexTest(Elastictest):
             self.index_time_taken = end_time - start_time
 
         def run(self):
-            super(ElasticIndexTest, self).run()
-            logger.info("Measuring the time it takes to index {} documents".format(self.elastic_doccount))
+            self.cleanup_and_restore()
             self.index_test()
+            self.report_kpi()
+
+        def _report_kpi(self):
             self.reporter.post_to_sf(
-                *self.metric_helper.calc_ftses_index(self.index_time_taken, name=' Elasticsearch 1.7')
+                *self.metric_helper.calc_ftses_index(self.index_time_taken,
+                                                     order_by=self.order_by,
+                                                     name=' Elasticsearch 1.7')
             )
 
 
 class ElasticLatencyTest(Elastictest):
         COLLECTORS = {"elastic_stats": True}
 
-        def run(self):
-            super(ElasticLatencyTest, self).run()
-            self.create_index()
-            self.addelastic()
-            self.wait_for_index()
-            self.access_bg_test()
-            if self.test_config.stats_settings.enabled:
-                self.reporter.post_to_sf(
-                    *self.metric_helper.calc_latency_ftses_queries(percentile=80,
-                                                                   dbname='fts_latency',
-                                                                   metrics='elastic_latency_get',
-                                                                   orderbymetric=self.orderbymetric,
-                                                                   name=' Elasticsearch 1.7'
-                                                                   ))
+        def _report_kpi(self):
+            self.reporter.post_to_sf(
+                *self.metric_helper.calc_latency_ftses_queries(percentile=80,
+                                                               dbname='fts_latency',
+                                                               metrics='elastic_latency_get',
+                                                               order_by=self.order_by,
+                                                               name=' Elasticsearch 1.7'
+                                                               ))
 
 
 class ElasticThroughputTest(Elastictest):
 
-        def run(self):
-            super(ElasticThroughputTest, self).run()
-            self.create_index()
-            self.addelastic()
-            self.wait_for_index()
-            self.access_bg_test()
-            if self.test_config.stats_settings.enabled:
-                self.reporter.post_to_sf(
-                    *self.metric_helper.calc_avg_fts_queries(orderbymetric=self.orderbymetric,
-                                                             name=' Elasticsearch 1.7')
-                )
+        def _report_kpi(self):
+            self.reporter.post_to_sf(
+                *self.metric_helper.calc_avg_fts_queries(order_by=self.order_by,
+                                                         name=' Elasticsearch 1.7')
+            )

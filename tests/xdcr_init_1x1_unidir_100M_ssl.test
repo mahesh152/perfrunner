@@ -1,8 +1,11 @@
 [test_case]
 test = perfrunner.tests.xdcr.XdcrInitTest
 title = Avg. initial XDCR rate (items/sec), 1 -> 1 UniDir, 1 bucket x 100M x 1KB, SSL
-summary = Initial XDCR test, 1 -> 1 nodes, 1 bucket x 100M x 1KB, no compaction, UniDir, Self-Signed Certificate
-larger_is_better = true
+component = xdcr
+category = init
+
+[stats]
+monitored_processes = goxdcr
 
 [cluster]
 mem_quota = 204800
@@ -13,19 +16,17 @@ num_buckets = 1
 replica_number = 0
 
 [xdcr_cluster]
-sourceNozzlePerNode = 64
+sourceNozzlePerNode = 4
 targetNozzlePerNode = 64
-optimisticReplicationThreshold = 0
 
 [compaction]
 db_percentage = 100
 view_percentage = 100
 
 [load]
-ops = 100000000
+items = 100000000
 size = 800
-workers = 40
-async = 1
+workers = 80
 
 [xdcr]
 replication_type = unidir

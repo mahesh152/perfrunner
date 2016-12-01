@@ -1,4 +1,3 @@
-import logging
 import os
 import time
 from collections import defaultdict
@@ -20,15 +19,23 @@ from spring.cbgen import (
     SubDocGen,
 )
 from spring.docgen import (
+    ArrayIndexingDocument,
+    Document,
     ExistingKey,
+    ExtReverseLookupDocument,
+    FTSKey,
+    ImportExportDocument,
+    ImportExportDocumentArray,
+    ImportExportDocumentNested,
+    JoinedDocument,
     KeyForCASUpdate,
     KeyForRemoval,
-    NewDocument,
+    LargeDocument,
+    NestedDocument,
     NewKey,
-    NewLargeDocument,
-    NewNestedDocument,
+    RefDocument,
     ReverseLookupDocument,
-    ReverseLookupDocumentArrayIndexing,
+    ReverseRangeLookupDocument,
     SequentialHotKey,
 )
 from spring.querygen import N1QLQueryGen, ViewQueryGen, ViewQueryGenByType
@@ -59,55 +66,72 @@ class Worker(object):
 
     BATCH_SIZE = 100
 
-    def __init__(self, workload_settings, target_settings,
-                 shutdown_event=None):
+    def __init__(self, workload_settings, target_settings, shutdown_event=None):
         self.ws = workload_settings
         self.ts = target_settings
         self.shutdown_event = shutdown_event
-        logger.setLevel(logging.INFO)
 
+        self.next_report = 0.05  # report after every 5% of completion
+
+        self.init_keys()
+        self.init_docs()
+        self.init_db()
+
+    def init_keys(self):
         self.existing_keys = ExistingKey(self.ws.working_set,
                                          self.ws.working_set_access,
                                          self.ts.prefix)
         self.new_keys = NewKey(self.ts.prefix, self.ws.expiration)
         self.keys_for_removal = KeyForRemoval(self.ts.prefix)
+        self.fts_keys = FTSKey(self.ws)
 
-        if not hasattr(self.ws, 'doc_gen') or self.ws.doc_gen == 'old':
-            self.docs = NewDocument(self.ws.size)
-        elif self.ws.doc_gen == 'new':
-            self.docs = NewNestedDocument(self.ws.size)
+    def init_docs(self):
+        if not hasattr(self.ws, 'doc_gen') or self.ws.doc_gen == 'basic':
+            self.docs = Document(self.ws.size)
+        elif self.ws.doc_gen == 'nested':
+            self.docs = NestedDocument(self.ws.size)
         elif self.ws.doc_gen == 'reverse_lookup':
-            is_random = self.ts.prefix != 'n1ql'
             self.docs = ReverseLookupDocument(self.ws.size,
-                                              self.ws.doc_partitions,
-                                              is_random)
-        elif self.ws.doc_gen == 'reverse_lookup_array_indexing':
-            if self.ws.updates:
-                # plus 10 to all values in array when updating doc
-                self.docs = ReverseLookupDocumentArrayIndexing(
-                    self.ws.size, self.ws.doc_partitions, self.ws.items,
-                    delta=random.randint(0, 10))
-            else:
-                self.docs = ReverseLookupDocumentArrayIndexing(
-                    self.ws.size, self.ws.doc_partitions, self.ws.items)
+                                              self.ts.prefix)
+        elif self.ws.doc_gen == 'reverse_range_lookup':
+            self.docs = ReverseRangeLookupDocument(self.ws.size,
+                                                   prefix='n1ql',
+                                                   range_distance=self.ws.range_distance)
+        elif self.ws.doc_gen == 'ext_reverse_lookup':
+            self.docs = ExtReverseLookupDocument(self.ws.size,
+                                                 self.ts.prefix,
+                                                 self.ws.items)
+        elif self.ws.doc_gen == 'join':
+            self.docs = JoinedDocument(self.ws.size,
+                                       self.ts.prefix,
+                                       self.ws.items,
+                                       self.ws.num_categories,
+                                       self.ws.num_replies)
+        elif self.ws.doc_gen == 'ref':
+            self.docs = RefDocument(self.ws.size,
+                                    self.ts.prefix)
+        elif self.ws.doc_gen == 'array_indexing':
+            self.docs = ArrayIndexingDocument(self.ws.size,
+                                              self.ts.prefix,
+                                              self.ws.array_size,
+                                              self.ws.items)
+        elif self.ws.doc_gen == 'import_export_simple':
+            self.docs = ImportExportDocument(self.ws.size,
+                                             self.ts.prefix)
+        elif self.ws.doc_gen == 'import_export_array':
+            self.docs = ImportExportDocumentArray(self.ws.size,
+                                                  self.ts.prefix)
+        elif self.ws.doc_gen == 'import_export_nested':
+            self.docs = ImportExportDocumentNested(self.ws.size,
+                                                   self.ts.prefix)
         elif self.ws.doc_gen == 'large_subdoc':
-            self.docs = NewLargeDocument(self.ws.size)
+            self.docs = LargeDocument(self.ws.size)
 
-        self.next_report = 0.05  # report after every 5% of completion
+    def init_db(self):
+        host, port = self.ts.node.split(':')
+        params = {'bucket': self.ts.bucket, 'host': host, 'port': port,
+                  'username': self.ts.bucket, 'password': self.ts.password}
 
-        # Only FTS uses proxyPort and authless bucket right now.
-        # Instead of jumping hoops to specify proxyPort in target
-        # iterator/settings, which only passes down very specific attributes,
-        # just detect fts instead. The following does not work with
-        # authless bucket. FTS's worker does its own Couchbase.connect
-        if not (hasattr(self.ws, "fts") and hasattr(
-                self.ws.fts, "doc_database_url")):
-            host, port = self.ts.node.split(':')
-            self.init_db({'bucket': self.ts.bucket, 'host': host, 'port': port,
-                          'username': self.ts.bucket,
-                          'password': self.ts.password})
-
-    def init_db(self, params):
         try:
             self.cb = CBGen(**params)
         except Exception as e:
@@ -135,6 +159,7 @@ class KVWorker(Worker):
             ['r'] * self.ws.reads + \
             ['u'] * self.ws.updates + \
             ['d'] * self.ws.deletes + \
+            ['fu'] * self.ws.fts_updates + \
             [cases] * self.ws.cases
         random.shuffle(ops)
 
@@ -189,6 +214,9 @@ class KVWorker(Worker):
             elif op == 'counter':
                 key = self.existing_keys.next(curr_items_spot, deleted_spot)
                 cmds.append((cb.cas, (key, self.ws.subdoc_counter_fields)))
+            elif op == 'fu':
+                key = self.fts_keys.next()
+                cmds.append((cb.fts_update, (key, )))
         return cmds
 
     @with_sleep
@@ -228,15 +256,15 @@ class KVWorker(Worker):
 
 class SubDocWorker(KVWorker):
 
-    def __init__(self, workload_settings, target_settings, shutdown_event):
-        super(SubDocWorker, self).__init__(workload_settings, target_settings,
-                                           shutdown_event)
+    NAME = 'sub-doc-worker'
+
+    def init_db(self):
         host, port = self.ts.node.split(':')
         params = {'bucket': self.ts.bucket, 'host': host, 'port': port,
                   'username': self.ts.bucket, 'password': self.ts.password}
         self.cb = SubDocGen(**params)
 
-    def gen_cmd_sequence(self, cb=None):
+    def gen_cmd_sequence(self, cb=None, *args):
         return super(SubDocWorker, self).gen_cmd_sequence(cb, cases='counter')
 
 
@@ -246,7 +274,11 @@ class AsyncKVWorker(KVWorker):
 
     NUM_CONNECTIONS = 8
 
-    def init_db(self, params):
+    def init_db(self):
+        host, port = self.ts.node.split(':')
+        params = {'bucket': self.ts.bucket, 'host': host, 'port': port,
+                  'username': self.ts.bucket, 'password': self.ts.password}
+
         self.cbs = [CBAsyncGen(**params) for _ in range(self.NUM_CONNECTIONS)]
         self.counter = range(self.NUM_CONNECTIONS)
 
@@ -347,13 +379,12 @@ class WorkerFactory(object):
             worker = SeqUpdatesWorker
         elif getattr(workload_settings, 'seq_reads', False):
             worker = SeqReadsWorker
-        elif not (getattr(workload_settings, 'seq_updates', False) or
-                  getattr(workload_settings, 'seq_reads', False)):
+        else:
             worker = KVWorker
         return worker, workload_settings.workers
 
 
-class SubdocWorkerFactory(object):
+class SubDocWorkerFactory(object):
 
     def __new__(cls, workload_settings):
         return SubDocWorker, workload_settings.subdoc_workers
@@ -417,7 +448,6 @@ class ViewWorker(Worker):
                 with lock:
                     curr_queries.value += self.BATCH_SIZE
                 self.do_batch()
-                self.report_progress(curr_queries.value)
         except (KeyboardInterrupt, ValueFormatError, AttributeError) as e:
             logger.info('Interrupted: {}-{}, {}'.format(self.NAME, self.sid, e))
         else:
@@ -435,99 +465,133 @@ class N1QLWorker(Worker):
     NAME = 'n1ql-worker'
 
     def __init__(self, workload_settings, target_settings, shutdown_event):
+        self.new_queries = N1QLQueryGen(workload_settings.n1ql_queries)
+        self.total_workers = workload_settings.n1ql_workers
+        self.throughput = workload_settings.n1ql_throughput
+
+        self.reservoir = Reservoir(num_workers=workload_settings.n1ql_workers)
+
         super(N1QLWorker, self).__init__(workload_settings, target_settings,
                                          shutdown_event)
-        self.new_queries = N1QLQueryGen(workload_settings.n1ql_queries)
-        self.total_workers = self.ws.n1ql_workers
-        self.throughput = self.ws.n1ql_throughput
 
-        host, port = self.ts.node.split(':')
-
+    def init_keys(self):
         self.existing_keys = ExistingKey(self.ws.working_set,
                                          self.ws.working_set_access,
-                                         'n1ql')
-        self.new_keys = NewKey('n1ql', self.ws.expiration)
+                                         prefix='n1ql')
+        self.new_keys = NewKey(prefix='n1ql', expiration=self.ws.expiration)
         self.keys_for_casupdate = KeyForCASUpdate(self.total_workers,
                                                   self.ws.working_set,
                                                   self.ws.working_set_access,
-                                                  'n1ql')
+                                                  prefix='n1ql')
 
+    def init_docs(self):
         if self.ws.doc_gen == 'reverse_lookup':
             self.docs = ReverseLookupDocument(self.ws.size,
-                                              self.ws.doc_partitions,
-                                              is_random=False)
-        elif self.ws.doc_gen == 'reverse_lookup_array_indexing':
-            if self.ws.updates:
-                self.docs = ReverseLookupDocumentArrayIndexing(
-                    self.ws.size, self.ws.doc_partitions, self.ws.items,
-                    delta=random.randint(0, 10))
-            else:
-                self.docs = ReverseLookupDocumentArrayIndexing(
-                    self.ws.size, self.ws.doc_partitions, self.ws.items)
+                                              prefix='n1ql')
+        elif self.ws.doc_gen == 'reverse_range_lookup':
+            self.docs = ReverseRangeLookupDocument(self.ws.size,
+                                                   prefix='n1ql',
+                                                   range_distance=self.ws.range_distance)
+        elif self.ws.doc_gen == 'ext_reverse_lookup':
+            self.docs = ExtReverseLookupDocument(self.ws.size,
+                                                 prefix='n1ql',
+                                                 num_docs=self.ws.items)
+        elif self.ws.doc_gen == 'join':
+            self.docs = JoinedDocument(self.ws.size,
+                                       prefix='n1ql',
+                                       num_docs=self.ws.items,
+                                       num_categories=self.ws.num_categories,
+                                       num_replies=self.ws.num_replies)
+        elif self.ws.doc_gen == 'ref':
+            self.docs = RefDocument(self.ws.size,
+                                    prefix='n1ql')
+        elif self.ws.doc_gen == 'array_indexing':
+            self.docs = ArrayIndexingDocument(self.ws.size,
+                                              prefix='n1ql',
+                                              array_size=self.ws.array_size,
+                                              num_docs=self.ws.items)
 
+    def init_db(self):
+        host, port = self.ts.node.split(':')
         self.cb = N1QLGen(bucket=self.ts.bucket, password=self.ts.password,
                           host=host, port=port)
 
-        self.reservoir = Reservoir(num_workers=workload_settings.n1ql_workers)
+    def read(self):
+        curr_items_tmp = self.curr_items.value
+        if self.ws.doc_gen == 'ext_reverse_lookup':
+            curr_items_tmp /= 4
+
+        for _ in range(self.BATCH_SIZE):
+            key = self.existing_keys.next(curr_items=curr_items_tmp,
+                                          curr_deletes=0)
+            doc = self.docs.next(key)
+            doc['key'] = key
+            doc['bucket'] = self.ts.bucket
+            query = self.new_queries.next(doc)
+
+            _, latency = self.cb.query(query)
+            self.reservoir.update(latency)
+
+    def create(self):
+        with self.lock:
+            self.curr_items.value += self.BATCH_SIZE
+            curr_items_tmp = self.curr_items.value - self.BATCH_SIZE
+
+        for _ in range(self.BATCH_SIZE):
+            curr_items_tmp += 1
+            key, ttl = self.new_keys.next(curr_items=curr_items_tmp)
+            doc = self.docs.next(key)
+            doc['key'] = key
+            doc['bucket'] = self.ts.bucket
+            query = self.new_queries.next(doc)
+
+            _, latency = self.cb.query(query)
+            self.reservoir.update(latency)
+
+    def update(self):
+        with self.lock:
+            self.cas_updated_items.value += self.BATCH_SIZE
+            curr_items_tmp = self.curr_items.value - self.BATCH_SIZE
+
+        for _ in range(self.BATCH_SIZE):
+            key = self.keys_for_casupdate.next(self.sid,
+                                               curr_items=curr_items_tmp,
+                                               curr_deletes=0)
+            doc = self.docs.next(key)
+            doc['key'] = key
+            doc['bucket'] = self.ts.bucket
+            query = self.new_queries.next(doc)
+
+            _, latency = self.cb.query(query)
+            self.reservoir.update(latency)
+
+    def range_update(self):
+        with self.lock:
+            self.cas_updated_items.value += self.BATCH_SIZE
+            curr_items_tmp = self.curr_items.value - self.BATCH_SIZE
+
+        for _ in range(self.BATCH_SIZE):
+            key = self.keys_for_casupdate.next(self.sid,
+                                               curr_items=curr_items_tmp,
+                                               curr_deletes=0)
+            doc = self.docs.next(key)
+            doc['key'] = key
+            doc['bucket'] = self.ts.bucket
+            query = self.new_queries.next(doc)
+
+            _, latency = self.cb.query(query)
+            self.reservoir.update(latency)
 
     @with_sleep
     def do_batch(self):
         if self.ws.n1ql_op == 'read':
-            curr_items_spot = \
-                self.curr_items.value - self.ws.creates * self.ws.workers
-            deleted_spot = \
-                self.deleted_items.value + self.ws.deletes * self.ws.workers
-            for _ in range(self.BATCH_SIZE):
-                key = self.existing_keys.next(curr_items_spot, deleted_spot)
-                doc = self.docs.next(key)
-                doc['key'] = key
-                doc['bucket'] = self.ts.bucket
-                query = self.new_queries.next(doc)
-                _, latency = self.cb.query(query)
-                self.reservoir.update(latency)
-            return
-
-        curr_items_tmp = curr_items_spot = self.curr_items.value
-        if self.ws.n1ql_op == 'create':
-            with self.lock:
-                self.curr_items.value += self.BATCH_SIZE
-                curr_items_tmp = self.curr_items.value - self.BATCH_SIZE
-            curr_items_spot = (curr_items_tmp -
-                               self.BATCH_SIZE * self.total_workers)
+            self.read()
+        elif self.ws.n1ql_op == 'create':
+            self.create()
         elif self.ws.n1ql_op == 'update':
-            with self.lock:
-                self.cas_updated_items.value += self.BATCH_SIZE
-
-        if self.ws.n1ql_op == 'create':
-            for _ in range(self.BATCH_SIZE):
-                curr_items_tmp += 1
-                key, ttl = self.new_keys.next(curr_items_tmp)
-                doc = self.docs.next(key)
-                doc['key'] = key
-                doc['bucket'] = self.ts.bucket
-                query = self.new_queries.next(doc)
-                _, latency = self.cb.query(query)
-                self.reservoir.update(latency)
-        elif self.ws.n1ql_op == 'update':
-            for _ in range(self.BATCH_SIZE):
-                key = self.keys_for_casupdate.next(self.sid, curr_items_spot,
-                                                   curr_deletes=0)
-                doc = self.docs.next(key)
-                doc['key'] = key
-                doc['bucket'] = self.ts.bucket
-                query = self.new_queries.next(doc)
-                _, latency = self.cb.query(query)
-                self.reservoir.update(latency)
+            self.update()
         elif self.ws.n1ql_op == 'rangeupdate':
-            for _ in range(self.BATCH_SIZE):
-                key = self.keys_for_casupdate.next(self.sid, curr_items_spot,
-                                                   curr_deletes=0)
-                doc = self.docs.next(key)
-                doc['key'] = key
-                doc['bucket'] = self.ts.bucket
-                query = self.new_queries.next(doc)
-                _, latency = self.cb.query(query)
-                self.reservoir.update(latency)
+            self.range_update()
 
     def run(self, sid, lock, curr_queries, curr_items, deleted_items,
             cas_updated_items):
@@ -540,7 +604,6 @@ class N1QLWorker(Worker):
         self.lock = lock
         self.sid = sid
         self.curr_items = curr_items
-        self.deleted_items = deleted_items
         self.cas_updated_items = cas_updated_items
         self.curr_queries = curr_queries
 
@@ -550,7 +613,6 @@ class N1QLWorker(Worker):
                 with self.lock:
                     curr_queries.value += self.BATCH_SIZE
                 self.do_batch()
-                self.report_progress(curr_queries.value)
         except (KeyboardInterrupt, ValueFormatError, AttributeError) as e:
             logger.info('Interrupted: {}-{}-{}'.format(self.NAME, self.sid, e))
         else:
@@ -562,10 +624,8 @@ class N1QLWorker(Worker):
 class FtsWorkerFactory(object):
 
     def __new__(cls, workload_settings):
-        '''
-         For FTS worker one extra worker is added,
-         this worker will do the log collection
-        '''
+        """For FTS worker one extra worker is added, this worker will do the log
+        collection."""
         if workload_settings.fts_config:
             return FtsWorker, workload_settings.fts_config.worker
         return FtsWorker, 0
@@ -590,59 +650,52 @@ class FtsWorker(Worker):
         self.fts_es_query.prepare_query()
         self.count = 0
 
+    def init_keys(self):
+        pass
+
+    def init_docs(self):
+        pass
+
+    def init_db(self):
+        pass
+
     def do_check_result(self, r):
-        '''
-        Check whether the query returned 0 hits
-        '''
+        """Check whether the query returned 0 hits"""
         if self.ws.fts_config.elastic:
             return r.json()["hits"]["total"] == 0
         return r.json()['total_hits'] == 0
 
     def do_batch(self):
-        '''
-        need to store the info if any zero hit, no results
-        we cant do for all workers. one worker will do this,
-        all inputs are from iterator, so it will have a fair
-        amount to proper result. Last worker is scheduled to
+        """Need to store the info if any zero hit, no results we cant do for all
+        workers. one worker will do this, all inputs are from iterator, so it
+        will have a fair amount to proper result. Last worker is scheduled to
         do the logging stuff.
-        '''
+        """
         for i in range(self.BATCH_SIZE):
             if not self.time_to_stop():
                 cmd, args = self.fts_es_query.next()
                 if self.sid == self.ws.fts_config.worker - 1:
-                    '''
-                    collect stats for last worker
-                    '''
                     try:
                         r = cmd(**args)
-                        '''
-                        increment in sinle thread, so llock needed
-                        '''
+                        # Increment in single thread, so lock is not needed
                         self.count += 1
                         if self.count % 500 == 0:
-                            '''
-                             Dump a sample of queries
-                             '''
                             logger.info(args)
                             logger.info(r.text)
+
                         if not self.ws.fts_config.logfile:
-                            '''
-                             Error Checking if logfile is missing test file
-                            '''
                             continue
-                        f = open(self.ws.fts_config.logfile, 'a')
+
                         if r.status_code not in range(200, 203) \
                                 or self.do_check_result(r):
-                            f.write(str(args))
-                            f.write(str(r.status_code))
-                            f.write(str(r.text))
-                        f.close()
+                            with open(self.ws.fts_config.logfile, 'a') as f:
+                                f.write(str(args))
+                                f.write(str(r.status_code))
+                                f.write(str(r.text))
                     except IOError as e:
                         logger.info("I/O error({0}): {1}".format(e.errno, e.strerror))
                 else:
-                    '''
-                     Only running the rest API no error checking
-                    '''
+                    # Only running the rest API, no error checking
                     cmd(**args)
 
     def run(self, sid, lock):
@@ -707,7 +760,7 @@ class WorkloadGen(object):
 
         self.start_workers(WorkerFactory,
                            'kv', curr_items, deleted_items)
-        self.start_workers(SubdocWorkerFactory,
+        self.start_workers(SubDocWorkerFactory,
                            'subdoc', curr_items, deleted_items)
         self.start_workers(ViewWorkerFactory,
                            'view', curr_items, deleted_items)

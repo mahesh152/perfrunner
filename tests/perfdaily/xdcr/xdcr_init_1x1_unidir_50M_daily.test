@@ -1,8 +1,10 @@
 [test_case]
 test = perfdaily.master.xdcr.XdcrInitTestDaily
 title = Avg. initial XDCR rate (items/sec), 1 -> 1 UniDir, 1 bucket x 50M x 1KB
-summary = Initial XDCR test, 1 -> 1 nodes, 1 bucket x 100M x 1KB, no compaction, UniDir
-larger_is_better = true
+category = XDCR
+
+[stats]
+monitored_processes = goxdcr
 
 [cluster]
 mem_quota = 58000
@@ -30,5 +32,4 @@ workers = 40
 replication_type = unidir
 
 [dailyp]
-dailyp_category = XDCR
 threshold = 20

@@ -1,8 +1,11 @@
 [test_case]
 test = perfdaily.master.n1ql.N1QLLatencyTestDaily
 title = Q3, Range Scan, latency, 5M docs, latency, GSI, MOI, not_bounded
-summary = Range Scan, 30KSops, 960Qops
-larger_is_better = false
+category = n1ql
+sub_category = MOI
+
+[stats]
+lat_interval = 0.2
 
 [stats]
 lat_interval = 0.2
@@ -29,7 +32,6 @@ items = 5000000
 size = 1024
 workers = 80
 doc_gen = reverse_lookup
-doc_partitions = 1
 
 [n1ql]
 indexes =
@@ -55,6 +57,4 @@ scan_consistency = not_bounded
 args = ["{capped_small}"]
 
 [dailyp]
-dailyp_category = n1ql
-dailyp_subcategory = MOI
 threshold = 20

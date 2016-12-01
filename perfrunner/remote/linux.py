@@ -339,8 +339,8 @@ class RemoteLinux(Remote):
 
     @all_hosts
     def detect_core_dumps(self):
-        # Based on kernel.core_pattern = /tmp/core.%e.%p.%h.%t
-        r = run('ls /tmp/core*', quiet=True)
+        # Based on kernel.core_pattern = /data/core-%e-%p
+        r = run('ls /data/core*', quiet=True)
         if not r.return_code:
             return r.split()
         else:
@@ -357,10 +357,10 @@ class RemoteLinux(Remote):
         """This is updated cbrestore for spock support. As we move to spock, old
         version is not needed ft-indexes is disabled to not to take any backup
         for indices."""
-        cmd = "cd /opt/couchbase/bin && ./cbbackupmgr restore --include-buckets={}  --archive {} --repo {} " \
+        cmd = "cd /opt/couchbase/bin && ./cbbackupmgr restore --archive {} --repo {} " \
               " --host http://localhost:8091 --username Administrator " \
               "--password password --threads 30 --disable-ft-indexes --disable-gsi-indexes".\
-            format(self.test_config.buckets[0], archive_path, repo_path)
+            format(archive_path, repo_path)
         run(cmd)
 
     @single_host

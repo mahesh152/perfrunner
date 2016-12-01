@@ -1,8 +1,8 @@
 [test_case]
 test = perfrunner.tests.n1ql.N1QLThroughputTest
-title = Q3, Range Scan, 20M docs, 30KSops, GSI, MOI, request_plus
-summary = Range Scan, 30KSops
-larger_is_better = false
+title = Q3, Range Scan, MOI, request_plus
+component = n1ql
+category = Q1_Q3_thr
 
 [cluster]
 mem_quota = 20480
@@ -12,12 +12,6 @@ num_buckets = 1
 
 [secondary]
 indexer.settings.storage_mode = memory_optimized
-indexer.settings.compaction.min_size = 1048576
-indexer.settings.persisted_snapshot.interval = 3000
-indexer.settings.wal_size = 40960
-indexer.settings.maxVbQueueLength = 10000
-indexer.settings.max_cpu_percent = 2400
-indexer.settings.scan_timeout = 0
 indexer.settings.gc_percent = 200
 
 [load]
@@ -25,7 +19,6 @@ items = 20000000
 size = 1024
 workers = 80
 doc_gen = reverse_lookup
-doc_partitions = 1
 
 [n1ql]
 indexes =
@@ -41,7 +34,6 @@ items = 20000000
 workers = 20
 time = 1200
 n1ql_queries = range-scan
-n1ql_throughput = 1000000
 n1ql_workers = 720
 
 [n1ql-range-scan]

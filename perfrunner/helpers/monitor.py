@@ -11,6 +11,7 @@ class Monitor(RestHelper):
     POLLING_INTERVAL_INDEXING = 1
     MAX_RETRY = 60
     REBALANCE_TIMEOUT = 3600 * 2
+    TIMEOUT = 3600 * 12
 
     DISK_QUEUES = (
         'ep_queue_size',
@@ -25,9 +26,9 @@ class Monitor(RestHelper):
         'ep_tap_rebalance_queue_backfillremaining',
     )
 
-    UPR_QUEUES = (
-        'ep_upr_replica_items_remaining',
-        'ep_upr_other_items_remaining',
+    DCP_QUEUES = (
+        'ep_dcp_replica_items_remaining',
+        'ep_dcp_other_items_remaining',
     )
 
     XDCR_QUEUES = (
@@ -57,15 +58,16 @@ class Monitor(RestHelper):
 
         logger.info('Rebalance completed')
 
-    def _wait_for_empty_queues(self, host_port, bucket, queues, stats_function=None):
+    def _wait_for_empty_queues(self, host_port, bucket, queues,
+                               stats_function=None):
+        stats_function = stats_function or self.get_bucket_stats
         metrics = list(queues)
+
+        start_time = time.time()
         while metrics:
-            if stats_function:
-                bucket_stats = stats_function(host_port, bucket)
-            else:
-                bucket_stats = self.get_bucket_stats(host_port, bucket)
-            # As we are changing metrics in the loop; take a copy of
-            # it to iterate over.
+            bucket_stats = stats_function(host_port, bucket)
+            # As we are changing metrics in the loop; take a copy of it to
+            # iterate over.
             for metric in list(metrics):
                 stats = bucket_stats['op']['samples'].get(metric)
                 if stats:
@@ -78,6 +80,8 @@ class Monitor(RestHelper):
                 metrics.remove(metric)
             if metrics:
                 time.sleep(self.POLLING_INTERVAL)
+            if time.time() - start_time > self.TIMEOUT:
+                raise Exception('Queue got stuck')
 
     def monitor_disk_queues(self, host_port, bucket):
         logger.info('Monitoring disk queues: {}'.format(bucket))
@@ -87,9 +91,9 @@ class Monitor(RestHelper):
         logger.info('Monitoring TAP queues: {}'.format(bucket))
         self._wait_for_empty_queues(host_port, bucket, self.TAP_QUEUES)
 
-    def monitor_upr_queues(self, host_port, bucket):
-        logger.info('Monitoring UPR queues: {}'.format(bucket))
-        self._wait_for_empty_queues(host_port, bucket, self.UPR_QUEUES)
+    def monitor_dcp_queues(self, host_port, bucket):
+        logger.info('Monitoring DCP queues: {}'.format(bucket))
+        self._wait_for_empty_queues(host_port, bucket, self.DCP_QUEUES)
 
     def monitor_xdcr_queues(self, host_port, bucket):
         logger.info('Monitoring XDCR queues: {}'.format(bucket))

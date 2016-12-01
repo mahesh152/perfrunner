@@ -1,8 +1,8 @@
 [test_case]
 test = perfrunner.tests.n1ql.N1QLThroughputTest
-title = Q3 Array Indexing, Range Scan, 20M docs, 3KSops, GSI, MOI, request_plus
-summary = N1QL Q3 Array Indexing Range Scan, 3KSops
-larger_is_better = true
+title = Q3 Array Indexing, Range Scan, MOI, request_plus
+component = n1ql
+category = array
 
 [cluster]
 mem_quota = 20480
@@ -12,20 +12,13 @@ num_buckets = 1
 
 [secondary]
 indexer.settings.storage_mode = memory_optimized
-indexer.settings.compaction.min_size = 1048576
-indexer.settings.persisted_snapshot.interval = 3000
-indexer.settings.wal_size = 40960
-indexer.settings.maxVbQueueLength = 10000
-indexer.settings.max_cpu_percent = 2400
-indexer.settings.scan_timeout = 0
 indexer.settings.gc_percent = 200
 
 [load]
 items = 20000000
 size = 1024
 workers = 80
-doc_gen = reverse_lookup_array_indexing
-doc_partitions = 1
+doc_gen = array_indexing
 
 [secondary]
 indexer.settings.compaction.compaction_mode = full
@@ -44,7 +37,6 @@ items = 20000000
 workers = 20
 time = 1200
 n1ql_queries = singleton-unique-lookup
-n1ql_throughput = 1000000
 n1ql_workers = 720
 
 [n1ql-singleton-unique-lookup]

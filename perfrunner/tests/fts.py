@@ -1,29 +1,23 @@
 import json
 import time
-
 import requests
 from logger import logger
 from requests.auth import HTTPBasicAuth
 
 from perfrunner.helpers.cbmonitor import with_stats
+from perfrunner.helpers.misc import get_json_from_file
 from perfrunner.tests import PerfTest
 
 
 class FTStest(PerfTest):
 
-    """
-    The most basic FTS workflow:
-        Initial data load ->
-            Persistence and intra-cluster replication (for consistency) ->
-                Data compaction (for consistency) ->
-                    "Hot" load or working set warm up ->
-                        "access" phase or active workload
-    """
+    WAIT_TIME = 1
+    INDEX_WAIT_MAX = 1200
 
     def __init__(self, cluster_spec, test_config, verbose):
         super(FTStest, self).__init__(cluster_spec, test_config, verbose)
 
-        self.index_definition = self.get_json_from_file(self.test_config.fts_settings.index_configfile)
+        self.index_definition = get_json_from_file(self.test_config.fts_settings.index_configfile)
         self.host_port = [x for x in self.cluster_spec.yield_servers()][0]
         self.host = self.host_port.split(':')[0]
         self.fts_port = 8094
@@ -31,12 +25,11 @@ class FTStest(PerfTest):
         self.fts_index = self.test_config.fts_settings.name
         self.header = {'Content-Type': 'application/json'}
         self.requests = requests.session()
-        self.wait_time = 30
         self.fts_doccount = self.test_config.fts_settings.items
         self.prepare_index()
         self.index_time_taken = 0
         self.auth = HTTPBasicAuth('Administrator', 'password')
-        self.orderbymetric = self.test_config.fts_settings.orderby
+        self.order_by = self.test_config.fts_settings.order_by
 
     @staticmethod
     def get_json_from_file(file_name):
@@ -44,7 +37,7 @@ class FTStest(PerfTest):
             return json.load(fh)
 
     @with_stats
-    def access(self):
+    def access(self, *args):
         super(FTStest, self).timer()
 
     def access_bg_test(self):
@@ -53,16 +46,24 @@ class FTStest(PerfTest):
         self.access_bg(access_settings)
         self.access()
 
-    def load(self):
+    def load(self, *args):
         logger.info('load/restore data to bucket')
         self.remote.cbrestorefts(self.test_config.fts_settings.storage, self.test_config.fts_settings.repo)
 
     def run(self):
+        self.workload = self.test_config.access_settings
+        self.cleanup_and_restore()
+        self.create_index()
+        self.wait_for_index()
+        self.check_rec_presist()
+        self.access_bg_test()
+        self.report_kpi()
+
+    def cleanup_and_restore(self):
         self.delete_index()
         self.load()
         self.wait_for_persistence()
         self.compact_bucket()
-        self.workload = self.test_config.access_settings
 
     def delete_index(self):
         self.requests.delete(self.index_url,
@@ -85,7 +86,7 @@ class FTStest(PerfTest):
         while rec_memory != 0:
             logger.info("Record persists to be expected: %s" % rec_memory)
             r = self.requests.get(url=self.fts_url, auth=self.auth)
-            time.sleep(self.wait_time)
+            time.sleep(self.WAIT_TIME)
             rec_memory = r.json()[key]
 
     def create_index(self):
@@ -99,39 +100,26 @@ class FTStest(PerfTest):
             logger.info("HEADER: %s" % self.header)
             logger.error(r.text)
             raise RuntimeError("Failed to create FTS index")
-        time.sleep(self.wait_time)
+        time.sleep(self.WAIT_TIME)
 
-    def wait_for_index(self, wait_interval=10, progress_interval=60):
+    def wait_for_index(self):
         logger.info(' Waiting for Index to be completed')
-        last_reported = time.time()
-        lastcount = 0
-        retry = 0
-        while True and (retry != 6):
+        attempts = 0
+        while True:
             r = self.requests.get(url=self.index_url + '/count', auth=self.auth)
-            if not r.status_code == 200:
-                raise RuntimeError(
-                    "Failed to fetch document count of index. Status {}".format(r.status_code))
+            if r.status_code != 200:
+                raise RuntimeError("Failed to fetch document count of index. Status {}".format(r.status_code))
             count = int(r.json()['count'])
-            if lastcount >= count:
-                retry += 1
-                time.sleep(wait_interval * retry)
-                logger.info('count of documents :{} is same or less for retry {}'.format(count, retry))
-                continue
-            retry = 0
-            logger.info("Done at document count {}".
-                        format(count))
             if count >= self.fts_doccount:
-                logger.info("Finished at document count {}".
-                            format(count))
+                logger.info("Finished at document count {}".format(count))
                 return
-            check_report = time.time()
-            if check_report - last_reported >= progress_interval:
-                last_reported = check_report
-                logger.info("(progress) Document count is at {}".
-                            format(count))
-            lastcount = count
-        if lastcount != self.fts_doccount:
-            raise RuntimeError("Failed to create Index")
+            else:
+                if not attempts % 10:
+                    logger.info("(progress) idexed documents count {}".format(count))
+                attempts += 1
+                time.sleep(self.WAIT_TIME)
+                if (attempts * self.WAIT_TIME) >= self.INDEX_WAIT_MAX:
+                    raise RuntimeError("Failed to create Index")
 
 
 class FtsIndexTest(FTStest):
@@ -148,52 +136,42 @@ class FtsIndexTest(FTStest):
             self.index_time_taken = end_time - start_time
 
         def run(self):
-            super(FtsIndexTest, self).run()
-            logger.info("Creating FTS index {} on {}".
-                        format(self.fts_index, self.host_port))
-            logger.info("Measuring the time it takes to index {} documents".
-                        format(self.fts_doccount))
+            self.cleanup_and_restore()
             self.index_test()
+            self.report_kpi()
+
+        def _report_kpi(self):
             self.reporter.post_to_sf(
-                *self.metric_helper.calc_ftses_index(self.index_time_taken, orderbymetric=self.orderbymetric)
+                *self.metric_helper.calc_ftses_index(self.index_time_taken,
+                                                     order_by=self.order_by)
             )
 
 
 class FTSLatencyTest(FTStest):
-        COLLECTORS = {'fts_latency': True, "fts_query_stats": True, "fts_stats": True}
+        COLLECTORS = {'fts_latency': True,
+                      "fts_query_stats": True,
+                      "fts_stats": True}
 
-        def run(self):
-            super(FTSLatencyTest, self).run()
-            self.create_index()
-            self.wait_for_index()
-            self.check_rec_presist()
-            self.access_bg_test()
-            if self.test_config.stats_settings.enabled:
-                self.reporter.post_to_sf(
-                    *self.metric_helper.calc_latency_ftses_queries(percentile=80,
-                                                                   dbname='fts_latency',
-                                                                   metrics='cbft_latency_get',
-                                                                   orderbymetric=self.orderbymetric)
-                )
-                self.reporter.post_to_sf(
-                    *self.metric_helper.calc_latency_ftses_queries(percentile=0,
-                                                                   dbname='fts_latency',
-                                                                   metrics='cbft_latency_get',
-                                                                   orderbymetric=self.orderbymetric)
-                )
+        def _report_kpi(self):
+            self.reporter.post_to_sf(
+                *self.metric_helper.calc_latency_ftses_queries(percentile=80,
+                                                               dbname='fts_latency',
+                                                               metrics='cbft_latency_get',
+                                                               order_by=self.order_by)
+            )
+            self.reporter.post_to_sf(
+                *self.metric_helper.calc_latency_ftses_queries(percentile=0,
+                                                               dbname='fts_latency',
+                                                               metrics='cbft_latency_get',
+                                                               order_by=self.order_by)
+            )
 
 
 class FTSThroughputTest(FTStest):
         COLLECTORS = {'fts_query_stats': True,
                       "fts_stats": True}
 
-        def run(self):
-            super(FTSThroughputTest, self).run()
-            self.create_index()
-            self.wait_for_index()
-            self.check_rec_presist()
-            self.access_bg_test()
-            if self.test_config.stats_settings.enabled:
-                self.reporter.post_to_sf(
-                    *self.metric_helper.calc_avg_fts_queries(orderbymetric=self.orderbymetric)
-                )
+        def _report_kpi(self):
+            self.reporter.post_to_sf(
+                *self.metric_helper.calc_avg_fts_queries(order_by=self.order_by)
+            )

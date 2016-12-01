@@ -1,8 +1,6 @@
 [test_case]
 test = perfrunner.tests.n1ql.N1QLThroughputTest
 title = Q2 RYOW, Singleton Unique Lookup, 20M docs, 30KSops, MOI
-summary = Singleton Unique Lookup, 30KSops
-larger_is_better = true
 
 [cluster]
 mem_quota = 20480
@@ -15,7 +13,6 @@ items = 20000000
 size = 1024
 workers = 40
 doc_gen = reverse_lookup
-doc_partitions = 1
 
 [n1ql]
 indexes =

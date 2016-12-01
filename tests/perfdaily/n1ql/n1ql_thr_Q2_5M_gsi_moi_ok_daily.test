@@ -1,8 +1,8 @@
 [test_case]
 test = perfdaily.master.n1ql.N1QLThroughputTestDaily
 title = Q2, Singleton Unique Lookup, throughput, 5M docs, GSI, MOI, not_bounded
-summary = Singleton Unique Lookup, 30KSops
-larger_is_better = true
+category = n1ql
+sub_category = MOI
 
 [cluster]
 mem_quota = 20480
@@ -20,7 +20,6 @@ items = 5000000
 size = 1024
 workers = 40
 doc_gen = reverse_lookup
-doc_partitions = 1
 
 [n1ql]
 indexes =
@@ -56,6 +55,4 @@ scan_consistency = not_bounded
 args = ["{email}"]
 
 [dailyp]
-dailyp_category = n1ql
-dailyp_subcategory = MOI
-threshold = 20
+threshold = 10

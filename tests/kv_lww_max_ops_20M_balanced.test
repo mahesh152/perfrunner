@@ -1,8 +1,7 @@
 [test_case]
 test = perfrunner.tests.kv.PillowfightTest
 title = Pillowfight, 50/50 R/W, 20M ops, 1KB items, LWW
-summary = Pillowfight op/sec, 20M ops with balanced workload, LWW bucket
-larger_is_better = true
+component = kv
 
 [cluster]
 mem_quota = 51200
@@ -11,7 +10,7 @@ num_buckets = 1
 
 [bucket]
 replica_number = 1
-time_synchronization = enabledWithoutDrift
+conflict_resolution_type=lww
 
 [load]
 size = 1024

@@ -46,15 +46,6 @@ class IndexTest(PerfTest):
         for master in self.cluster_spec.yield_masters():
             self.monitor.monitor_task(master, 'indexer')
 
-    def compact_index(self):
-        for master in self.cluster_spec.yield_masters():
-            for bucket in self.test_config.buckets:
-                for ddoc_name in self.ddocs:
-                    self.rest.trigger_index_compaction(master, bucket,
-                                                       ddoc_name)
-        for master in self.cluster_spec.yield_masters():
-            self.monitor.monitor_task(master, 'view_compaction')
-
 
 class InitialIndexTest(IndexTest):
 
@@ -69,20 +60,22 @@ class InitialIndexTest(IndexTest):
     def build_index(self):
         super(InitialIndexTest, self).build_index()
 
+    def _report_kpi(self, time_elapsed):
+        self.reporter.post_to_sf(time_elapsed)
+
     def run(self):
         self.load()
         self.wait_for_persistence()
-        self.compact_bucket()
 
         self.define_ddocs()
         from_ts, to_ts = self.build_index()
         time_elapsed = (to_ts - from_ts) / 1000.0
 
         time_elapsed = self.reporter.finish('Initial index', time_elapsed)
-        self.reporter.post_to_sf(time_elapsed)
+        self.report_kpi(time_elapsed)
 
 
-class InitialAndIncrementalIndexTest(IndexTest):
+class InitialAndIncrementalIndexTest(InitialIndexTest):
 
     """
     Extended version of initial indexing test which also has access phase for
@@ -91,41 +84,29 @@ class InitialAndIncrementalIndexTest(IndexTest):
     """
 
     @with_stats
-    def build_init_index(self):
-        return super(InitialAndIncrementalIndexTest, self).build_index()
+    def build_index(self):
+        super(InitialIndexTest, self).build_index()
 
     @with_stats
     def build_incr_index(self):
-        super(InitialAndIncrementalIndexTest, self).build_index()
+        super(InitialIndexTest, self).build_index()
+
+    def _report_kpi(self, time_elapsed, index_type='Initial'):
+        self.reporter.post_to_sf(
+            *self.metric_helper.get_indexing_meta(time_elapsed, index_type)
+        )
 
     def run(self):
-        self.load()
-        self.wait_for_persistence()
-        self.compact_bucket()
-
-        self.reporter.start()
-        self.define_ddocs()
-        from_ts, to_ts = self.build_init_index()
-        time_elapsed = (to_ts - from_ts) / 1000.0
-
-        time_elapsed = self.reporter.finish('Initial index', time_elapsed)
-        self.reporter.post_to_sf(
-            *self.metric_helper.get_indexing_meta(value=time_elapsed,
-                                                  index_type='Initial')
-        )
+        super(InitialAndIncrementalIndexTest, self).run()
 
         self.access()
         self.wait_for_persistence()
-        self.compact_bucket()
 
         from_ts, to_ts = self.build_incr_index()
         time_elapsed = (to_ts - from_ts) / 1000.0
 
         time_elapsed = self.reporter.finish('Incremental index', time_elapsed)
-        self.reporter.post_to_sf(
-            *self.metric_helper.get_indexing_meta(value=time_elapsed,
-                                                  index_type='Incremental')
-        )
+        self.report_kpi(time_elapsed, index_type='Incremental')
 
 
 class DevIndexTest(IndexTest):
@@ -143,8 +124,3 @@ class DevIndexTest(IndexTest):
         if index_type is None:
             logger.interrupt('Missing index_type param')
         self.ddocs = ViewGenDev().generate_ddocs(index_type)
-
-
-class DevInitialIndexTest(DevIndexTest, InitialIndexTest):
-
-    pass
