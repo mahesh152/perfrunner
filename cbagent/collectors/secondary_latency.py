@@ -1,4 +1,5 @@
 import os.path
+import traceback
 
 from cbagent.collectors import Collector
 
@@ -27,7 +28,10 @@ class SecondaryLatencyStats(Collector):
         return stats
 
     def sample(self):
-        stats = self._get_secondaryscan_latency()
+	try:
+            stats = self._get_secondaryscan_latency()
+	except Exception as e:
+	    traceback.print_exc()
         if stats:
             self.update_metric_metadata(stats.keys())
             self.store.append(stats, cluster=self.cluster, collector=self.COLLECTOR)
