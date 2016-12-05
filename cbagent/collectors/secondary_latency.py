@@ -8,6 +8,10 @@ class SecondaryLatencyStats(Collector):
 
     COLLECTOR = "secondaryscan_latency"
 
+    def __init__(self, settings):
+        super(SecondaryLatencyStats, self).__init__(settings)
+        self.store.drop_db(cluster=self.cluster, collector=self.COLLECTOR)
+
     def _get_secondaryscan_latency(self):
         stats = {}
         if os.path.isfile(self.secondary_statsfile):
@@ -25,6 +29,8 @@ class SecondaryLatencyStats(Collector):
                     stats[latency_key] = int(latency)
                 except StopIteration:
                     pass
+                except Exception:
+                    traceback.print_exc()
         return stats
 
     def sample(self):

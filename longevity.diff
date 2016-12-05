@@ -1,0 +1,461 @@
+diff --git a/cbagent/collectors/secondary_latency.py b/cbagent/collectors/secondary_latency.py
+index d17c727..4ac8879 100644
+--- a/cbagent/collectors/secondary_latency.py
++++ b/cbagent/collectors/secondary_latency.py
+@@ -1,4 +1,5 @@
+ import os.path
++import traceback
+ 
+ from cbagent.collectors import Collector
+ 
+@@ -7,6 +8,10 @@ class SecondaryLatencyStats(Collector):
+ 
+     COLLECTOR = "secondaryscan_latency"
+ 
++    def __init__(self, settings):
++        super(SecondaryLatencyStats, self).__init__(settings)
++        self.store.drop_db(cluster=self.cluster, collector=self.COLLECTOR)
++
+     def _get_secondaryscan_latency(self):
+         stats = {}
+         if os.path.isfile(self.secondary_statsfile):
+@@ -24,6 +29,8 @@ class SecondaryLatencyStats(Collector):
+                     stats[latency_key] = int(latency)
+                 except StopIteration:
+                     pass
++                except Exception:
++                    traceback.print_exc()
+         return stats
+ 
+     def sample(self):
+diff --git a/cbagent/stores.py b/cbagent/stores.py
+index 955c30e..af384b5 100644
+--- a/cbagent/stores.py
++++ b/cbagent/stores.py
+@@ -49,3 +49,17 @@ class SerieslyStore(object):
+             db.append(data, timestamp=timestamp)
+         except (BadRequest, socket.error):  # Ignore bad requests
+             pass
++
++    def drop_db(self, cluster=None, server=None, bucket=None, index=None, collector=None):
++        db_name = self.build_dbname(cluster, server, bucket, index, collector)
++        try:
++            existing_dbs = self.seriesly.list_dbs()
++        except ConnectionError as e:
++            logger.interrupt("seriesly not available: {}".format(e))
++        else:
++            if db_name not in existing_dbs:
++                logger.info("DB not present: {}".format(db_name))
++                return
++            logger.info("Dropping DB: {}".format(db_name))
++            self.seriesly.drop_db(db_name)
++            return
+diff --git a/clusters/dessert.cluster b/clusters/dessert.cluster
+new file mode 100644
+index 0000000..ef38459
+--- /dev/null
++++ b/clusters/dessert.cluster
+@@ -0,0 +1,25 @@
++[clusters]
++nyx =
++    172.16.12.33:8091
++    172.16.12.41:8091
++    172.16.12.9:8091,index
++    172.16.12.57:8091
++
++[clients]
++hosts =
++    172.16.12.49
++credentials = root:couchbase
++
++[storage]
++data = /data
++index = /data
++
++[credentials]
++rest = Administrator:password
++ssh = root:couchbase
++
++[parameters]
++OS = CentOS 7
++CPU = Data: E5-2630 (24 vCPU), Index: CPU E5-2680 v3 (48 vCPU)
++Memory = Data: 64 GB, Index: 512 GB
++Disk = SSD
+\ No newline at end of file
+diff --git a/clusters/dessert.ini b/clusters/dessert.ini
+new file mode 100644
+index 0000000..dd0d44d
+--- /dev/null
++++ b/clusters/dessert.ini
+@@ -0,0 +1,15 @@
++[kv]
++172.16.12.33
++172.16.12.41
++172.16.12.57
++
++[index]
++172.16.12.9
++
++[clients]
++172.16.12.49
++
++[all:vars]
++ansible_user=root
++ansible_ssh_pass=couchbase
++ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+diff --git a/perfrunner/tests/secondary.py b/perfrunner/tests/secondary.py
+index 0be451b..d392bfd 100644
+--- a/perfrunner/tests/secondary.py
++++ b/perfrunner/tests/secondary.py
+@@ -1,6 +1,11 @@
+ import json
++import os
+ import subprocess
+ import time
++from threading import Thread
++from decorator import decorator
++from datetime import datetime
++from calendar import timegm
+ 
+ import numpy as np
+ from logger import logger
+@@ -9,6 +14,16 @@ from cbagent.stores import SerieslyStore
+ from perfrunner.helpers.cbmonitor import with_stats
+ from perfrunner.tests import PerfTest
+ 
++@decorator
++def time_it(method, *args, **kwargs):
++    from_ts = datetime.utcnow()
++    method(*args, **kwargs)
++    to_ts = datetime.utcnow()
++
++    from_ts = timegm(from_ts.timetuple()) * 1000  # -> ms
++    to_ts = timegm(to_ts.timetuple()) * 1000  # -> ms
++    return from_ts, to_ts
++
+ 
+ class SecondaryIndexTest(PerfTest):
+     """
+@@ -206,6 +221,28 @@ class SecondaryIndexTest(PerfTest):
+         else:
+             logger.info('Scan workload applied')
+ 
++    def remove_statsfile(self):
++        rmfile = "rm -f {}".format(self.test_config.stats_settings.secondary_statsfile)
++        status = subprocess.call(rmfile, shell=True)
++        if status != 0:
++            raise Exception('existing 2i latency stats file could not be removed')
++        else:
++            logger.info('Existing 2i latency stats file removed')
++
++    def read_scanresults(self):
++        with open('{}'.format(self.configfile)) as config_file:
++            configdata = json.load(config_file)
++        numscans = configdata['ScanSpecs'][0]['Repeat']
++
++        with open('result.json') as result_file:
++            resdata = json.load(result_file)
++        duration_s = (resdata['Duration'])
++        num_rows = resdata['Rows']
++        """scans and rows per sec"""
++        scansps = numscans / duration_s
++        rowps = num_rows / duration_s
++        return scansps, rowps
++
+ 
+ class InitialandIncrementalSecondaryIndexTest(SecondaryIndexTest):
+     """
+@@ -305,20 +342,6 @@ class SecondaryIndexingThroughputTest(SecondaryIndexTest):
+             round(scan_thr, 1)
+         )
+ 
+-    def read_scanresults(self):
+-        with open('{}'.format(self.configfile)) as config_file:
+-            configdata = json.load(config_file)
+-        numscans = configdata['ScanSpecs'][0]['Repeat']
+-
+-        with open('result.json') as result_file:
+-            resdata = json.load(result_file)
+-        duration_s = (resdata['Duration'])
+-        num_rows = resdata['Rows']
+-        """scans and rows per sec"""
+-        scansps = numscans / duration_s
+-        rowps = num_rows / duration_s
+-        return scansps, rowps
+-
+     def run(self):
+         self.run_load_for_2i()
+         self.wait_for_persistence()
+@@ -384,14 +407,6 @@ class SecondaryIndexingScanLatencyTest(SecondaryIndexTest):
+             *self.metric_helper.calc_secondary_scan_latency(percentile=80)
+         )
+ 
+-    def remove_statsfile(self):
+-        rmfile = "rm -f {}".format(self.test_config.stats_settings.secondary_statsfile)
+-        status = subprocess.call(rmfile, shell=True)
+-        if status != 0:
+-            raise Exception('existing 2i latency stats file could not be removed')
+-        else:
+-            logger.info('Existing 2i latency stats file removed')
+-
+     def run(self):
+         self.remove_statsfile()
+         self.run_load_for_2i()
+@@ -564,3 +579,105 @@ class SecondaryNumConnectionsTest(SecondaryIndexTest):
+         logger.info('Connections: {}'.format(connections))
+ 
+         self.report_kpi(connections)
++
++
++class LongevitySecondaryIndexTest(SecondaryIndexTest):
++    """
++    The test is longevity test.
++    """
++    COLLECTORS = {'secondary_latency': True}
++
++    def __init__(self, *args):
++        super(LongevitySecondaryIndexTest, self).__init__(*args)
++
++        self.incremental_build_times = []
++        self.throughputs = {}
++        self.latencies = {}
++
++        self.config_files = {"staleok_all": "tests/gsi/plasma/config/config_scanthr_all_plasma.json",
++                             "stalefalse_all":
++                                 "tests/gsi/plasma/config/config_scanthr_all_sessionconsistent_plasma.json",
++                             "staleok_range": "tests/gsi/plasma/config/config_scanthr_range_plasma.json",
++                             "stalefalse_range":
++                                 "tests/gsi/plasma/config/config_scanthr_range_sessionconsistent_plasma.json"}
++
++    @time_it
++    def build_incrindex_with_time(self):
++        access_settings = self.test_config.access_settings
++        load_settings = self.test_config.load_settings
++        if self.secondaryDB == 'memdb':
++            self.remote.run_spring_on_kv(ls=access_settings)
++        else:
++            self.worker_manager.run_workload(access_settings, self.target_iterator)
++            self.worker_manager.wait_for_workers()
++        numitems = load_settings.items + access_settings.items
++        self.monitor.wait_for_secindex_incr_build(self.index_nodes, self.bucket,
++                                                  self.active_indexes, numitems)
++
++    def get_latency(self):
++        return self.metric_helper.calc_secondary_scan_latency(80)
++
++    def run_continuous_load(self, stop):
++        counter = 1
++        while True:
++            from_ts, to_ts = self.build_incrindex_with_time()
++            time_elapsed = (to_ts - from_ts) / 1000.0
++            logger.info('Time taken to build incremental index {} time : {} sec'.format(counter, time_elapsed))
++            self.incremental_build_times.append(time_elapsed)
++            counter += 1
++            if stop():
++                break
++
++    def apply_continuous_scanworkload(self, stop):
++        counter = 1
++        while True:
++            for key in self.config_files.keys():
++                self.remove_statsfile()
++                self.configfile = self.config_files[key]
++                self.apply_scanworkload()
++                scan_thr, row_thr = self.read_scanresults()
++                logger.info('Scan throughput {} time : {}'.format(counter, scan_thr))
++                logger.info('Rows throughput {} time : {}'.format(counter, row_thr))
++                throughputs = self.throughputs.get(key)
++                latencies = self.latencies.get(key)
++                if throughputs is None:
++                    self.throughputs[key] = [scan_thr]
++                    self.latencies[key] = [self.get_latency()]
++                else:
++                    throughputs.append(scan_thr)
++                    self.throughputs[key] = throughputs
++                    latencies.append(self.get_latency())
++                    self.latencies[key] = latencies
++                counter += 1
++                if stop():
++                    break
++            if stop():
++                break
++
++    def print_timings(self):
++        logger.info("Incremental timings are - {}".format(self.incremental_build_times))
++        for key in self.throughputs.keys():
++            logger.info("Throughputs for {} - {}".format(key, self.throughputs.get(key)))
++        for key in self.latencies.keys():
++            logger.info("Latencies for {} - {}".format(key, self.latencies.get(key)))
++
++    def run(self):
++        self.run_load_for_2i()
++        self.wait_for_persistence()
++        self.compact_bucket()
++        from_ts, to_ts = self.build_secondaryindex()
++        time_elapsed = (to_ts - from_ts) / 1000.0
++        logger.info('Time taken to build initial index : {} sec'.format(time_elapsed))
++
++        stop_threads = False
++        threads = []
++        threads.append(Thread(target=self.run_continuous_load, args=(lambda: stop_threads)))
++        threads.append(Thread(target=self.apply_continuous_scanworkload, args=(lambda: stop_threads)))
++
++        # sleep for 3 days
++        time.sleep(259200)
++        stop_threads = True
++        for t in threads:
++            t.join()
++        self.print_timings()
++        logger.info('Test completed!')
+\ No newline at end of file
+diff --git a/tests/gsi/plasma/config/config_scanthr_all_plasma.json b/tests/gsi/plasma/config/config_scanthr_all_plasma.json
+new file mode 100644
+index 0000000..774e762
+--- /dev/null
++++ b/tests/gsi/plasma/config/config_scanthr_all_plasma.json
+@@ -0,0 +1,15 @@
++{
++       "Concurrency" : 128,
++       "Clients" : 5,
++       "ScanSpecs" : [
++          {
++             "Limit" : 1,
++             "Repeat" : 199999999,
++             "Type" : "All",
++             "Bucket" : "bucket-1",
++             "Id" : 1,
++             "Inclusion" : 3,
++             "Index" : "myindex"
++           }
++       ]
++}
+diff --git a/tests/gsi/plasma/config/config_scanthr_all_sessionconsistent_plasma.json b/tests/gsi/plasma/config/config_scanthr_all_sessionconsistent_plasma.json
+new file mode 100644
+index 0000000..9be89a4
+--- /dev/null
++++ b/tests/gsi/plasma/config/config_scanthr_all_sessionconsistent_plasma.json
+@@ -0,0 +1,16 @@
++{
++       "Concurrency" : 128,
++       "Clients" : 5,
++       "ScanSpecs" : [
++          {
++             "Limit" : 1,
++             "Repeat" : 19999999,
++             "Type" : "All",
++             "Bucket" : "bucket-1",
++             "Id" : 1,
++             "Inclusion" : 3,
++             "Index" : "myindex",
++             "Consistency" : true
++           }
++       ]
++}
+diff --git a/tests/gsi/plasma/config/config_scanthr_range_plasma.json b/tests/gsi/plasma/config/config_scanthr_range_plasma.json
+new file mode 100644
+index 0000000..526a53d
+--- /dev/null
++++ b/tests/gsi/plasma/config/config_scanthr_range_plasma.json
+@@ -0,0 +1,21 @@
++{
++       "Concurrency" : 128,
++       "Clients" : 5,
++       "ScanSpecs" : [
++          {
++             "Limit" : 1,
++             "Low" : [
++                "000015"
++             ],
++             "Repeat" : 199999999,
++             "Type" : "Range",
++             "Bucket" : "bucket-1",
++             "High" : [
++                "000028"
++             ],
++             "Id" : 1,
++             "Inclusion" : 3,
++             "Index" : "myindex"
++           }
++       ]
++}
+diff --git a/tests/gsi/plasma/config/config_scanthr_range_sessionconsistent_plasma.json b/tests/gsi/plasma/config/config_scanthr_range_sessionconsistent_plasma.json
+new file mode 100644
+index 0000000..38e7fac
+--- /dev/null
++++ b/tests/gsi/plasma/config/config_scanthr_range_sessionconsistent_plasma.json
+@@ -0,0 +1,22 @@
++{
++       "Concurrency" : 128,
++       "Clients" : 5,
++       "ScanSpecs" : [
++          {
++             "Limit" : 1,
++             "Low" : [
++                "000015"
++             ],
++             "Repeat" : 19999999,
++             "Type" : "Range",
++             "Bucket" : "bucket-1",
++             "High" : [
++                "000028"
++             ],
++             "Id" : 1,
++             "Inclusion" : 3,
++             "Index" : "myindex",
++             "Consistency" : true
++           }
++       ]
++}
+diff --git a/tests/gsi/plasma/longevity.test b/tests/gsi/plasma/longevity.test
+new file mode 100644
+index 0000000..6194934
+--- /dev/null
++++ b/tests/gsi/plasma/longevity.test
+@@ -0,0 +1,47 @@
++[test_case]
++test = perfrunner.tests.secondary.LongevitySecondaryIndexTest
++title = 1 bucket x 2B x 1KB, single 2i index, 100K ops/sec, Longevity, Plasma
++component = secondary
++
++[stats]
++monitored_processes = projector
++
++[cluster]
++mem_quota = 30000
++index_mem_quota = 400000
++initial_nodes = 4
++num_buckets = 1
++
++[compaction]
++db_percentage = 100
++view_percentage = 100
++
++[bucket]
++replica_number=0
++replica_index=0
++
++[bucket_extras]
++max_num_auxio = 16
++
++[load]
++items = 2000000000
++size = 1024
++spring_workers = 100
++
++[secondary]
++name = myindex
++field = email
++db = moi
++indexer.settings.storage_mode = memory_optimized
++indexer.settings.gc_percent = 200
++indexer.settings.max_cpu_percent = 4800
++
++[access]
++creates = 10
++updates = 80
++deletes = 10
++ops = 250000000
++items = 2000000000
++existing_items = 2000000000
++spring_workers = 100
++throughput = 100000

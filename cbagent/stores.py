@@ -49,3 +49,17 @@ class SerieslyStore(object):
             db.append(data, timestamp=timestamp)
         except (BadRequest, socket.error):  # Ignore bad requests
             pass
+
+    def drop_db(self, cluster=None, server=None, bucket=None, index=None, collector=None):
+        db_name = self.build_dbname(cluster, server, bucket, index, collector)
+        try:
+            existing_dbs = self.seriesly.list_dbs()
+        except ConnectionError as e:
+            logger.interrupt("seriesly not available: {}".format(e))
+        else:
+            if db_name not in existing_dbs:
+                logger.info("DB not present: {}".format(db_name))
+                return
+            logger.info("Dropping DB: {}".format(db_name))
+            self.seriesly.drop_db(db_name)
+            return

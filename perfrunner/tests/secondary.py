@@ -1,6 +1,11 @@
 import json
+import os
 import subprocess
 import time
+from threading import Thread
+from decorator import decorator
+from datetime import datetime
+from calendar import timegm
 
 import numpy as np
 from logger import logger
@@ -8,6 +13,16 @@ from logger import logger
 from cbagent.stores import SerieslyStore
 from perfrunner.helpers.cbmonitor import with_stats
 from perfrunner.tests import PerfTest
+
+@decorator
+def time_it(method, *args, **kwargs):
+    from_ts = datetime.utcnow()
+    method(*args, **kwargs)
+    to_ts = datetime.utcnow()
+
+    from_ts = timegm(from_ts.timetuple()) * 1000  # -> ms
+    to_ts = timegm(to_ts.timetuple()) * 1000  # -> ms
+    return from_ts, to_ts
 
 
 class SecondaryIndexTest(PerfTest):
@@ -206,6 +221,28 @@ class SecondaryIndexTest(PerfTest):
         else:
             logger.info('Scan workload applied')
 
+    def remove_statsfile(self):
+        rmfile = "rm -f {}".format(self.test_config.stats_settings.secondary_statsfile)
+        status = subprocess.call(rmfile, shell=True)
+        if status != 0:
+            raise Exception('existing 2i latency stats file could not be removed')
+        else:
+            logger.info('Existing 2i latency stats file removed')
+
+    def read_scanresults(self):
+        with open('{}'.format(self.configfile)) as config_file:
+            configdata = json.load(config_file)
+        numscans = configdata['ScanSpecs'][0]['Repeat']
+
+        with open('result.json') as result_file:
+            resdata = json.load(result_file)
+        duration_s = (resdata['Duration'])
+        num_rows = resdata['Rows']
+        """scans and rows per sec"""
+        scansps = numscans / duration_s
+        rowps = num_rows / duration_s
+        return scansps, rowps
+
 
 class InitialandIncrementalSecondaryIndexTest(SecondaryIndexTest):
     """
@@ -305,20 +342,6 @@ class SecondaryIndexingThroughputTest(SecondaryIndexTest):
             round(scan_thr, 1)
         )
 
-    def read_scanresults(self):
-        with open('{}'.format(self.configfile)) as config_file:
-            configdata = json.load(config_file)
-        numscans = configdata['ScanSpecs'][0]['Repeat']
-
-        with open('result.json') as result_file:
-            resdata = json.load(result_file)
-        duration_s = (resdata['Duration'])
-        num_rows = resdata['Rows']
-        """scans and rows per sec"""
-        scansps = numscans / duration_s
-        rowps = num_rows / duration_s
-        return scansps, rowps
-
     def run(self):
         self.run_load_for_2i()
         self.wait_for_persistence()
@@ -383,14 +406,6 @@ class SecondaryIndexingScanLatencyTest(SecondaryIndexTest):
         self.reporter.post_to_sf(
             *self.metric_helper.calc_secondary_scan_latency(percentile=80)
         )
-
-    def remove_statsfile(self):
-        rmfile = "rm -f {}".format(self.test_config.stats_settings.secondary_statsfile)
-        status = subprocess.call(rmfile, shell=True)
-        if status != 0:
-            raise Exception('existing 2i latency stats file could not be removed')
-        else:
-            logger.info('Existing 2i latency stats file removed')
 
     def run(self):
         self.remove_statsfile()
@@ -564,3 +579,105 @@ class SecondaryNumConnectionsTest(SecondaryIndexTest):
         logger.info('Connections: {}'.format(connections))
 
         self.report_kpi(connections)
+
+
+class LongevitySecondaryIndexTest(SecondaryIndexTest):
+    """
+    The test is longevity test.
+    """
+    COLLECTORS = {'secondary_latency': True}
+
+    def __init__(self, *args):
+        super(LongevitySecondaryIndexTest, self).__init__(*args)
+
+        self.incremental_build_times = []
+        self.throughputs = {}
+        self.latencies = {}
+
+        self.config_files = {"staleok_all": "tests/gsi/plasma/config/config_scanthr_all_plasma.json",
+                             "stalefalse_all":
+                                 "tests/gsi/plasma/config/config_scanthr_all_sessionconsistent_plasma.json",
+                             "staleok_range": "tests/gsi/plasma/config/config_scanthr_range_plasma.json",
+                             "stalefalse_range":
+                                 "tests/gsi/plasma/config/config_scanthr_range_sessionconsistent_plasma.json"}
+
+    @time_it
+    def build_incrindex_with_time(self):
+        access_settings = self.test_config.access_settings
+        load_settings = self.test_config.load_settings
+        if self.secondaryDB == 'memdb':
+            self.remote.run_spring_on_kv(ls=access_settings)
+        else:
+            self.worker_manager.run_workload(access_settings, self.target_iterator)
+            self.worker_manager.wait_for_workers()
+        numitems = load_settings.items + access_settings.items
+        self.monitor.wait_for_secindex_incr_build(self.index_nodes, self.bucket,
+                                                  self.active_indexes, numitems)
+
+    def get_latency(self):
+        return self.metric_helper.calc_secondary_scan_latency(80)
+
+    def run_continuous_load(self, stop):
+        counter = 1
+        while True:
+            from_ts, to_ts = self.build_incrindex_with_time()
+            time_elapsed = (to_ts - from_ts) / 1000.0
+            logger.info('Time taken to build incremental index {} time : {} sec'.format(counter, time_elapsed))
+            self.incremental_build_times.append(time_elapsed)
+            counter += 1
+            if stop():
+                break
+
+    def apply_continuous_scanworkload(self, stop):
+        counter = 1
+        while True:
+            for key in self.config_files.keys():
+                self.remove_statsfile()
+                self.configfile = self.config_files[key]
+                self.apply_scanworkload()
+                scan_thr, row_thr = self.read_scanresults()
+                logger.info('Scan throughput {} time : {}'.format(counter, scan_thr))
+                logger.info('Rows throughput {} time : {}'.format(counter, row_thr))
+                throughputs = self.throughputs.get(key)
+                latencies = self.latencies.get(key)
+                if throughputs is None:
+                    self.throughputs[key] = [scan_thr]
+                    self.latencies[key] = [self.get_latency()]
+                else:
+                    throughputs.append(scan_thr)
+                    self.throughputs[key] = throughputs
+                    latencies.append(self.get_latency())
+                    self.latencies[key] = latencies
+                counter += 1
+                if stop():
+                    break
+            if stop():
+                break
+
+    def print_timings(self):
+        logger.info("Incremental timings are - {}".format(self.incremental_build_times))
+        for key in self.throughputs.keys():
+            logger.info("Throughputs for {} - {}".format(key, self.throughputs.get(key)))
+        for key in self.latencies.keys():
+            logger.info("Latencies for {} - {}".format(key, self.latencies.get(key)))
+
+    def run(self):
+        self.run_load_for_2i()
+        self.wait_for_persistence()
+        self.compact_bucket()
+        from_ts, to_ts = self.build_secondaryindex()
+        time_elapsed = (to_ts - from_ts) / 1000.0
+        logger.info('Time taken to build initial index : {} sec'.format(time_elapsed))
+
+        stop_threads = False
+        threads = []
+        threads.append(Thread(target=self.run_continuous_load, args=(lambda: stop_threads)))
+        threads.append(Thread(target=self.apply_continuous_scanworkload, args=(lambda: stop_threads)))
+
+        # sleep for 3 days
+        time.sleep(259200)
+        stop_threads = True
+        for t in threads:
+            t.join()
+        self.print_timings()
+        logger.info('Test completed!')
